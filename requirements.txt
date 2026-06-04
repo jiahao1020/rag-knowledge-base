@@ -1,0 +1,25 @@
+# RAG知识库系统 - 依赖包
+# 安装: pip install -r requirements.txt
+
+# 核心依赖
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# 文档处理
+pypdf>=4.0.0
+python-docx>=1.0.0
+markdown>=3.5.0
+beautifulsoup4>=4.12.0
+
+# 工具
+tiktoken>=0.5.0
+numpy>=1.24.0
+
+# 可选：其他LLM提供商
+# langchain-anthropic>=0.0.5  # Claude
+# langchain-google-genai>=0.0.5  # Gemini
+# langchain-ollama>=0.0.1  # 本地模型

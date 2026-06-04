@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  rag-kb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rag-knowledge-base
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../data:/app/data
+      - ../docs:/app/docs
+      - ../vector_db:/app/vector_db
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # 可选：Qdrant向量数据库（生产环境推荐）
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant-storage:/qdrant/storage
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  qdrant-storage:
