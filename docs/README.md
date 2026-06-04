@@ -307,17 +307,21 @@ class RAGKnowledgeBase:
 cd rag-knowledge-base
 pip install -r requirements.txt
 
-# 2. 配置API密钥
-cp .env.example .env
+# 2. 配置
+cp .env.example .env          # 创建环境变量文件
 # 编辑 .env 填入你的API密钥
+# 可选：编辑 config.yml 修改模型、分块等参数
 
-# 3. 添加文档
+# 3. 添加本地文档
 python rag_knowledge_base.py --command add --dir docs --pattern "*.md"
 
-# 4. 查询
+# 4. 添加在线文档
+python rag_knowledge_base.py --command add --url https://example.com/doc
+
+# 5. 查询
 python rag_knowledge_base.py --command query --question "如何设置API密钥？"
 
-# 5. 启动Web界面
+# 6. 启动Web界面
 streamlit run app.py
 # 浏览器打开 http://localhost:8501
 ```
@@ -350,17 +354,31 @@ docker-compose up -d
 
 ## ⚙️ 配置说明
 
-编辑 `rag_knowledge_base.py` 中的 `Config` 类：
+编辑 `config.yml` 文件即可修改配置（无需修改代码），或删除 `config.yml` 使用默认值：
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `EMBEDDING_MODEL` | all-MiniLM-L6-v2 | 嵌入模型（本地） |
-| `LLM_PROVIDER` | openai | LLM提供商 |
-| `LLM_MODEL` | gpt-4o | LLM模型 |
-| `CHUNK_SIZE` | 500 | 分块大小（token） |
-| `CHUNK_OVERLAP` | 50 | 块重叠（token） |
-| `TOP_K` | 5 | 检索返回数量 |
-| `SIMILARITY_THRESHOLD` | 0.7 | 相似度阈值 |
+| `embedding_model` | BAAI/bge-large-zh-v1.5 | 嵌入模型（本地） |
+| `llm_provider` | openai | LLM提供商 |
+| `llm_model` | gpt-4o | LLM模型 |
+| `llm_base_url` | 无（使用官方API） | 兼容OpenAI接口的自定义地址 |
+| `chunk_size` | 500 | 分块大小（token） |
+| `chunk_overlap` | 50 | 块重叠（token） |
+| `top_k` | 5 | 检索返回数量 |
+| `similarity_threshold` | 0.7 | 相似度阈值 |
+
+### API密钥配置
+
+API密钥通过 `.env` 文件配置（**不要**放入 `config.yml`，避免提交到 git）：
+
+```bash
+# .env 文件内容
+OPENAI_API_KEY=sk-xxxxxxxxxxxx
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx
+GOOGLE_API_KEY=xxxxxxxxxxxx
+```
+
+程序启动时自动加载 `.env` 文件中的环境变量。
 
 ### LLM提供商切换
 
@@ -381,6 +399,25 @@ LLM_MODEL = "gemini-1.5-pro"
 LLM_PROVIDER = "local"
 LLM_MODEL = "llama3"
 ```
+
+### 对接国内模型
+
+国内模型（DeepSeek、通义千问、智谱等）大多兼容 OpenAI 接口格式，修改 `config.yml`：
+
+```yaml
+llm_provider: "openai"
+llm_model: "deepseek-chat"
+llm_base_url: "https://api.deepseek.com/v1"
+```
+
+然后在 `.env` 中填入对应 API key。常见国内模型 endpoint：
+
+| 服务 | base_url | 模型示例 |
+|------|----------|---------|
+| DeepSeek | `https://api.deepseek.com/v1` | deepseek-chat |
+| 阿里通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | qwen-plus |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | glm-4 |
+| 月之暗面 | `https://api.moonshot.cn/v1` | moonshot-v1 |
 
 ### 中文优化
 
@@ -491,9 +528,11 @@ LLM_MODEL = "llama3"
 
 ```
 rag-knowledge-base/
-├── rag_knowledge_base.py    # 核心RAG引擎（~540行）
+├── rag_knowledge_base.py    # 核心RAG引擎（~550行）
 ├── app.py                   # Streamlit Web界面（~280行）
+├── config.yml               # 配置文件（模型、分块、检索参数）
 ├── requirements.txt         # Python依赖
+├── .env                     # API密钥（不提交git）
 ├── .env.example             # 环境变量模板
 ├── docs/
 │   └── README.md            # 本文档

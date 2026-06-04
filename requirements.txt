@@ -18,6 +18,8 @@ beautifulsoup4>=4.12.0
 # 工具
 tiktoken>=0.5.0
 numpy>=1.24.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
 
 # 可选：其他LLM提供商
 # langchain-anthropic>=0.0.5  # Claude

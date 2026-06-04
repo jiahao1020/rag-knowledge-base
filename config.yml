@@ -1,0 +1,21 @@
+# RAG知识库配置文件
+# 复制此文件为 config.yml 并按需修改
+
+# 嵌入模型（本地部署）
+embedding_model: "BAAI/bge-large-zh-v1.5"
+
+# LLM配置
+llm_provider: "openai"  # openai | anthropic | google | local
+llm_model: "gpt-4o"
+# llm_base_url: "https://api.openai.com/v1"  # 对接国内模型时取消注释并改为此地址
+
+# 向量数据库
+vector_db: "chroma"  # chroma | faiss | qdrant
+
+# 分块配置
+chunk_size: 500       # 每个块的最大token数
+chunk_overlap: 50     # 块之间重叠的token数
+
+# 检索配置
+top_k: 5              # 检索返回的文档块数量
+similarity_threshold: 0.7  # 相似度阈值

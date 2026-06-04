@@ -18,39 +18,84 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
+# 加载 .env 文件（如存在），使 LLM API key 等环境变量生效
+from dotenv import load_dotenv
+load_dotenv()
+
 # ==================== 配置 ====================
 
 class Config:
-    """系统配置"""
-    # 项目根目录
+    """系统配置 - 优先从 config.yml 加载，不存在则使用默认值"""
+    # 项目根目录（固定，不放入配置文件）
     PROJECT_ROOT = Path(__file__).parent
-    
-    # 数据存储目录
+
+    # 数据存储目录（固定）
     DATA_DIR = PROJECT_ROOT / "data"
     DOCS_DIR = PROJECT_ROOT / "docs"
     DB_DIR = PROJECT_ROOT / "vector_db"
-    
+
     # 确保目录存在
     for d in [DATA_DIR, DOCS_DIR, DB_DIR]:
         d.mkdir(parents=True, exist_ok=True)
-    
-    # 嵌入模型（本地）
-    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-    
-    # LLM配置（可切换）
-    LLM_PROVIDER = "openai"  # openai | anthropic | google | local
+
+    # 配置文件路径
+    CONFIG_FILE = PROJECT_ROOT / "config.yml"
+
+    # 默认配置
+    EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
+    LLM_PROVIDER = "openai"
     LLM_MODEL = "gpt-4o"
-    
-    # 向量数据库
-    VECTOR_DB = "chroma"  # chroma | faiss | qdrant
-    
-    # 分块配置
-    CHUNK_SIZE = 500  # 每个块的最大token数
-    CHUNK_OVERLAP = 50  # 块之间重叠的token数
-    
-    # 检索配置
-    TOP_K = 5  # 检索返回的文档块数量
-    SIMILARITY_THRESHOLD = 0.7  # 相似度阈值
+    LLM_BASE_URL = None  # 默认为官方 API，国内模型改为此地址
+    VECTOR_DB = "chroma"
+    CHUNK_SIZE = 500
+    CHUNK_OVERLAP = 50
+    TOP_K = 5
+    SIMILARITY_THRESHOLD = 0.7
+
+    _loaded = False
+
+    @classmethod
+    def load(cls):
+        """从 YAML 文件加载配置"""
+        if cls._loaded:
+            return
+        cls._loaded = True
+
+        yml_path = cls.CONFIG_FILE
+        if not yml_path.exists():
+            return
+
+        try:
+            import yaml
+            with open(yml_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not data:
+                return
+
+            mapping = {
+                "embedding_model": "EMBEDDING_MODEL",
+                "llm_provider": "LLM_PROVIDER",
+                "llm_model": "LLM_MODEL",
+                "llm_base_url": "LLM_BASE_URL",
+                "vector_db": "VECTOR_DB",
+                "chunk_size": "CHUNK_SIZE",
+                "chunk_overlap": "CHUNK_OVERLAP",
+                "top_k": "TOP_K",
+                "similarity_threshold": "SIMILARITY_THRESHOLD",
+            }
+            for yaml_key, attr in mapping.items():
+                if yaml_key in data and data[yaml_key] is not None:
+                    setattr(cls, attr, data[yaml_key])
+
+            print(f"✅ 已加载配置: {yml_path}")
+        except ImportError:
+            print("⚠️  pyyaml 未安装，使用默认配置 (pip install pyyaml)")
+        except Exception as e:
+            print(f"⚠️  配置文件加载失败 ({e})，使用默认配置")
+
+
+# 启动时自动加载配置
+Config.load()
 
 
 # ==================== 文档处理 ====================
@@ -62,7 +107,7 @@ class DocumentProcessor:
     def load_document(file_path: Path) -> str:
         """加载文档内容"""
         suffix = file_path.suffix.lower()
-        
+
         if suffix == ".pdf":
             return DocumentProcessor._load_pdf(file_path)
         elif suffix in [".md", ".markdown"]:
@@ -73,6 +118,17 @@ class DocumentProcessor:
             return DocumentProcessor._load_docx(file_path)
         else:
             raise ValueError(f"不支持的文档格式: {suffix}")
+
+    @staticmethod
+    def load_url(url: str) -> str:
+        """加载在线文档"""
+        try:
+            from langchain_community.document_loaders import WebBaseLoader
+            loader = WebBaseLoader(url)
+            docs = loader.load()
+            return "\n\n".join([doc.page_content for doc in docs])
+        except ImportError:
+            raise ImportError("请安装langchain-community和beautifulsoup4: pip install langchain-community beautifulsoup4")
     
     @staticmethod
     def _load_pdf(file_path: Path) -> str:
@@ -181,6 +237,8 @@ class EmbeddingManager:
         """生成查询嵌入向量"""
         if self.model is None:
             self.load_model()
+        # bge 模型需要加检索指令前缀以获得更好效果
+        query = "为这个句子生成表示以用于检索相关文章：" + query
         return self.model.encode([query])[0].tolist()
 
 
@@ -307,7 +365,11 @@ class LLMGenerator:
             from langchain_openai import ChatOpenAI
             from langchain_core.messages import HumanMessage
             
-            llm = ChatOpenAI(model=self.model, temperature=0.7)
+            llm = ChatOpenAI(
+                model=self.model,
+                temperature=0.7,
+                base_url=Config.LLM_BASE_URL,
+            )
             response = llm.invoke([HumanMessage(content=prompt)])
             return response.content
         except ImportError:
@@ -374,23 +436,23 @@ class RAGKnowledgeBase:
         """添加文档到知识库"""
         if not self.is_initialized:
             self.initialize()
-        
+
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
-        
+
         print(f"📄 处理文档: {path.name}")
-        
+
         # 加载文档
         text = self.processor.load_document(path)
-        
+
         # 文本分块
         chunks = self.processor.split_text(text, Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
         print(f"   分成 {len(chunks)} 个块")
-        
+
         # 生成嵌入
         embeddings = self.embedding_manager.embed_documents(chunks)
-        
+
         # 添加元数据
         metadatas = [{
             "source": str(path),
@@ -399,6 +461,44 @@ class RAGKnowledgeBase:
             "chunk_index": i,
             "total_chunks": len(chunks)
         } for i in range(len(chunks))]
+
+        # 添加到向量库
+        self.vector_store.add_documents(chunks, embeddings, metadatas)
+
+        return len(chunks)
+
+    def add_url(self, url: str, collection_name: str = "default"):
+        """添加在线文档到知识库"""
+        if not self.is_initialized:
+            self.initialize()
+
+        print(f"🌐 加载在线文档: {url}")
+
+        # 加载在线文档
+        text = self.processor.load_url(url)
+        if not text.strip():
+            raise ValueError(f"无法从 {url} 获取内容")
+
+        # 文本分块
+        chunks = self.processor.split_text(text, Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
+        print(f"   分成 {len(chunks)} 个块")
+
+        # 生成嵌入
+        embeddings = self.embedding_manager.embed_documents(chunks)
+
+        # 添加元数据
+        metadatas = [{
+            "source": url,
+            "filename": url,
+            "collection": collection_name,
+            "chunk_index": i,
+            "total_chunks": len(chunks)
+        } for i in range(len(chunks))]
+
+        # 添加到向量库
+        self.vector_store.add_documents(chunks, embeddings, metadatas)
+
+        return len(chunks)
         
         # 添加到向量库
         self.vector_store.add_documents(chunks, embeddings, metadatas)
@@ -507,6 +607,7 @@ def main():
     parser.add_argument("--command", "-c", choices=["add", "query", "stats", "export"],
                         help="执行命令")
     parser.add_argument("--file", "-f", help="要添加的文件路径")
+    parser.add_argument("--url", "-u", help="要添加的在线文档URL")
     parser.add_argument("--dir", "-d", help="要添加的目录路径")
     parser.add_argument("--question", "-q", help="查询问题")
     parser.add_argument("--pattern", "-p", default="*.md", help="文件匹配模式")
@@ -519,10 +620,12 @@ def main():
     if args.command == "add":
         if args.file:
             kb.add_document(args.file)
+        elif args.url:
+            kb.add_url(args.url)
         elif args.dir:
             kb.add_directory(args.dir, args.pattern)
         else:
-            print("❌ 请指定 --file 或 --dir")
+            print("❌ 请指定 --file、--url 或 --dir")
     
     elif args.command == "query":
         if not args.question:
