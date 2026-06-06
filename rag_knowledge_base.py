@@ -306,51 +306,113 @@ class DocumentProcessor:
             raise ImportError("请安装 openpyxl: pip install openpyxl")
 
     @staticmethod
-    def split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
-        """文本分块 - 使用 list 拼接避免 O(n²) 性能问题"""
-        # 按段落分割
+    def split_text(text: str, chunk_size: int = 512, chunk_overlap: int = 80) -> List[str]:
+        """递归分块：按 Markdown 标题分段，tiktoken 精确计数"""
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            def count_tokens(s):
+                return len(enc.encode(s, disallowed_special=()))
+        except ImportError:
+            def count_tokens(s):
+                return int(len(s) / 1.5)
+
         paragraphs = text.split("\n\n")
         chunks = []
         current_parts = []
         current_len = 0
 
+        def flush():
+            nonlocal current_parts, current_len
+            if current_parts:
+                chunks.append("\n\n".join(current_parts).strip())
+                current_parts = []
+                current_len = 0
+
         for para in paragraphs:
-            para_len = len(para)
-            if current_len + para_len < chunk_size:
-                current_parts.append(para)
-                current_len += para_len + 2  # +2 for "\n\n"
-            else:
-                if current_parts:
-                    chunks.append("\n\n".join(current_parts).strip())
-                # 处理长段落
-                if para_len > chunk_size:
-                    # 按句子分割（支持中英文标点）
-                    sentences = re.split(r'(?<=[。！？.!?])\s*', para)
-                    current_parts = []
-                    current_len = 0
+            para_tokens = count_tokens(para)
+            is_heading = re.match(r"^#{1,6}\s", para.strip())
+
+            if is_heading and current_parts:
+                flush()
+
+            if not current_parts:
+                if para_tokens > chunk_size:
+                    # 段落本身超长，按句子拆分
+                    sentences = re.split(r"(?<=[。！？.!?])\s*", para)
                     for sent in sentences:
                         if not sent.strip():
                             continue
-                        if current_len + len(sent) < chunk_size:
-                            current_parts.append(sent)
-                            current_len += len(sent)
+                        sent_tokens = count_tokens(sent)
+                        # 如果句子仍然超长，按字符拆分
+                        if sent_tokens > chunk_size:
+                            for char in sent:
+                                if not char.strip():
+                                    continue
+                                char_tokens = count_tokens(char)
+                                if current_parts:
+                                    current_parts.append(char)
+                                    current_len += char_tokens
+                                else:
+                                    current_parts = [char]
+                                    current_len = char_tokens
+                                # 字符拆分时也要检查是否超过 chunk_size
+                                if current_len >= chunk_size:
+                                    flush()
                         else:
                             if current_parts:
-                                chunks.append("".join(current_parts).strip())
-                            current_parts = [sent]
-                            current_len = len(sent)
+                                current_parts.append(sent)
+                                current_len += sent_tokens
+                            else:
+                                current_parts = [sent]
+                                current_len = sent_tokens
                 else:
                     current_parts = [para]
-                    current_len = para_len
+                    current_len = para_tokens
+            elif current_len + para_tokens <= chunk_size:
+                current_parts.append(para)
+                current_len += para_tokens
+            else:
+                flush()
+                if para_tokens > chunk_size * 0.8:
+                    sentences = re.split(r"(?<=[。！？.!?])\s*", para)
+                    for sent in sentences:
+                        if not sent.strip():
+                            continue
+                        sent_tokens = count_tokens(sent)
+                        if sent_tokens > chunk_size:
+                            for char in sent:
+                                if not char.strip():
+                                    continue
+                                char_tokens = count_tokens(char)
+                                if current_parts:
+                                    current_parts.append(char)
+                                    current_len += char_tokens
+                                else:
+                                    current_parts = [char]
+                                    current_len = char_tokens
+                                # 字符拆分时也要检查是否超过 chunk_size
+                                if current_len >= chunk_size:
+                                    flush()
+                        else:
+                            if current_parts:
+                                current_parts.append(sent)
+                                current_len += sent_tokens
+                            else:
+                                current_parts = [sent]
+                                current_len = sent_tokens
+                else:
+                    current_parts = [para]
+                    current_len = para_tokens
 
-        if current_parts:
-            chunks.append("\n\n".join(current_parts).strip())
+        flush()
 
-        # 添加重叠
         if chunk_overlap > 0 and len(chunks) > 1:
             final_chunks = [chunks[0]]
             for i in range(1, len(chunks)):
-                overlap = chunks[i-1][-chunk_overlap:]
+                prev = chunks[i - 1]
+                overlap_chars = min(len(prev), chunk_overlap * 3)
+                overlap = prev[-overlap_chars:]
                 final_chunks.append(overlap + chunks[i])
             return final_chunks
 

@@ -160,7 +160,13 @@ with st.sidebar:
 
     if st.button("🗑️ 清空知识库", use_container_width=True, disabled=st.session_state.processing):
         st.session_state.show_upload = False
-        st.info("清空功能暂未实现")
+        if "kb" in st.session_state and st.session_state.kb is not None:
+            st.session_state.kb.clear()
+            st.session_state.kb_initialized = False
+            st.success("✅ 知识库已清空")
+            st.rerun()
+        else:
+            st.info("知识库尚未初始化")
 
     st.markdown("---")
 

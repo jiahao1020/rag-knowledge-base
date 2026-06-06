@@ -13,8 +13,8 @@ llm_base_url: "https://token.sensenova.cn/v1"  # 对接国内模型时取消注�
 vector_db: "chroma"  # chroma | faiss | qdrant
 
 # 分块配置
-chunk_size: 500       # 每个块的最大token数
-chunk_overlap: 50     # 块之间重叠的token数
+chunk_size: 512       # 每个块的最大token数
+chunk_overlap: 80     # 块之间重叠的token数
 
 # 检索配置
 top_k: 5              # 检索返回的文档块数量

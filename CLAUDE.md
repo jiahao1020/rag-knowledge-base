@@ -10,13 +10,13 @@ RAG（检索增强生成）知识库系统。支持 PDF/Markdown/TXT/DOCX/Excel 
 
 ## 架构
 
-**核心引擎**（`rag_knowledge_base.py`）：五个类组成流水线：
+**核心引擎**（`rag_knowledge_base.py`）：六个类组成流水线：
 - `Config` — 集中配置（分块大小、模型名称、提供商）
-- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX/Excel，文本分块；Excel 智能检测（`_detect_excel_type`）判断是否需要清洗
+- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX/Excel，递归分块（tiktoken 精确计数，Markdown 标题强制切分，句子/字符降级）；Excel 智能检测（`_detect_excel_type`）判断是否需要清洗
 - `EmbeddingManager` — 封装 sentence-transformers 用于本地嵌入
-- `VectorStore` — ChromaDB 持久化存储（余弦相似度、HNSW 索引）
+- `VectorStore` — ChromaDB 持久化存储（余弦相似度、HNSW 索引，支持清空）
 - `LLMGenerator` — 多提供商支持（OpenAI、Anthropic、Google、本地 Ollama）
-- `RAGKnowledgeBase` — 编排器，串联所有组件
+- `RAGKnowledgeBase` — 编排器，串联所有组件，支持 `clear()` 清空知识库
 
 **Web 界面**（`app.py`）：Streamlit 实现的文档上传和问答界面，已对接真实 RAG 引擎。通过 `@st.cache_resource` 缓存引擎实例，上传文件保存到临时路径后调用 `kb.add_document()` 处理，查询调用 `kb.query()` 获取真实检索结果和 LLM 回答。
 
@@ -24,7 +24,7 @@ RAG（检索增强生成）知识库系统。支持 PDF/Markdown/TXT/DOCX/Excel 
 
 ```
 rag-knowledge-base/
-├── rag_knowledge_base.py    # 核心 RAG 引擎（~550 行）
+├── rag_knowledge_base.py    # 核心 RAG 引擎（~850 行）
 ├── app.py                   # Streamlit Web 界面（~250 行）
 ├── config.yml               # 配置文件
 ├── requirements.txt         # Python 依赖
@@ -62,6 +62,9 @@ python rag_knowledge_base.py --command query --question "你的问题"
 # 查看统计信息
 python rag_knowledge_base.py --command stats
 
+# 清空知识库
+python rag_knowledge_base.py --command clear --yes
+
 # 导出知识库
 python rag_knowledge_base.py --command export --output export.json
 
@@ -83,8 +86,8 @@ cd docker && docker-compose up -d
 | `llm_model` | gpt-4o | LLM 模型名称 |
 | `llm_base_url` | 无（使用官方 API） | 兼容 OpenAI 接口的自定义地址 |
 | `vector_db` | chroma | chroma / faiss / qdrant |
-| `chunk_size` | 500 | 每块最大 token 数 |
-| `chunk_overlap` | 50 | 块之间重叠的 token 数 |
+| `chunk_size` | 512 | 每块最大 token 数（tiktoken 精确计数） |
+| `chunk_overlap` | 80 | 块之间重叠的 token 数（~15%） |
 | `top_k` | 5 | 检索返回的文档块数量 |
 | `similarity_threshold` | 0.7 | 相似度阈值 |
 

@@ -49,7 +49,7 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 | 功能模块 | 实现内容 | 代码行数 |
 |---------|---------|---------|
 | **文档加载** | 支持PDF、Markdown、TXT、DOCX、Excel五种格式 | ~95行 |
-| **文本分块** | 智能分块算法，支持自定义块大小和重叠 | ~60行 |
+| **文本分块** | 递归分块（tiktoken 精确计数，Markdown 标题强制切分，句子/字符降级） | ~110行 |
 | **向量化** | 本地嵌入模型（sentence-transformers） | ~40行 |
 | **向量存储** | ChromaDB持久化存储，支持查询和统计 | ~80行 |
 | **LLM生成** | 支持OpenAI、Anthropic、Google、本地Ollama四种提供商 | ~120行 |
@@ -82,8 +82,8 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `rag_knowledge_base.py` | ~800 | 核心引擎（含Excel智能清洗） |
-| `app.py` | ~300 | Web界面（响应式移动端适配） |
+| `rag_knowledge_base.py` | ~850 | 核心引擎（含Excel智能清洗、tiktoken 分块、清空功能） |
+| `app.py` | ~300 | Web界面（响应式移动端适配、清空按钮） |
 | `requirements.txt` | ~20 | 依赖列表 |
 | `.streamlit/config.toml` | ~3 | Streamlit配置（上传大小限制） |
 | `docker/Dockerfile` | ~25 | Docker镜像 |
@@ -186,10 +186,11 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 │                                              │                  │
 │                                              ▼                  │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  分块策略:                                                │   │
-│  │  - 默认块大小: 500 tokens                                 │   │
-│  │  - 块重叠: 50 tokens (保证上下文连续性)                   │   │
-│  │  - 按段落/句子智能分割                                    │   │
+│  │  分块策略 (递归分块):                                     │   │
+│  │  - 默认块大小: 512 tokens (tiktoken 精确计数)             │   │
+│  │  - 块重叠: 80 tokens (~15%, 保证上下文连续性)             │   │
+│  │  - 切分优先级: Markdown 标题 → 段落 → 句子 → 字符        │   │
+│  │  - Markdown 标题强制切分，保证标题和内容不分离            │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                              │                  │
 │                                              ▼                  │
@@ -236,14 +237,14 @@ class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     LLM_PROVIDER = "openai"
     LLM_MODEL = "gpt-4o"
-    CHUNK_SIZE = 500
-    CHUNK_OVERLAP = 50
+    CHUNK_SIZE = 512      # token 数，tiktoken 精确计数
+    CHUNK_OVERLAP = 80    # token 数，~15%
     TOP_K = 5
 
 class DocumentProcessor:
     """文档处理 - 多格式支持"""
     load_document()          # 加载PDF/MD/TXT/DOCX/Excel
-    split_text()             # 智能文本分块
+    split_text()             # 递归分块（tiktoken 精确计数，Markdown 标题强制切分）
     _load_excel_as_rows()    # Excel逐行读取
     _detect_excel_type()     # 自动检测是否需要清洗
     _add_excel_rows_raw()    # 普通表格逐行存储
@@ -259,6 +260,7 @@ class VectorStore:
     """向量数据库 - ChromaDB封装"""
     initialize()         # 初始化数据库
     add_documents()      # 添加文档块
+    clear()              # 清空集合
     search()             # 向量检索
     get_stats()          # 获取统计信息
 
@@ -276,6 +278,7 @@ class RAGKnowledgeBase:
     add_document()       # 添加单文档
     add_directory()      # 添加目录
     query()              # 查询
+    clear()              # 清空知识库
     get_stats()          # 统计
     export()             # 导出
 ```
@@ -367,8 +370,8 @@ docker-compose up -d
 | `llm_provider` | openai | LLM提供商 |
 | `llm_model` | gpt-4o | LLM模型 |
 | `llm_base_url` | 无（使用官方API） | 兼容OpenAI接口的自定义地址 |
-| `chunk_size` | 500 | 分块大小（token） |
-| `chunk_overlap` | 50 | 块重叠（token） |
+| `chunk_size` | 512 | 分块大小（token，tiktoken 精确计数） |
+| `chunk_overlap` | 80 | 块重叠（token，~15%） |
 | `top_k` | 5 | 检索返回数量 |
 | `similarity_threshold` | 0.7 | 相似度阈值 |
 
@@ -455,7 +458,36 @@ EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
 
 ## 📈 进阶功能
 
-### 1. 多集合管理
+### 1. 文本分块策略
+
+分块质量直接影响 RAG 检索效果。当前采用**递归分块**策略：
+
+**切分优先级**：Markdown 标题 → 段落 → 句子 → 字符
+
+- **Markdown 标题强制切分**：遇到 `#` 到 `######` 标题时立即切分，保证标题和内容在同一块
+- **tiktoken 精确计数**：使用 `cl100k_base` 编码精确计算 token 数，而非字符数
+- **句子降级拆分**：段落超过 chunk_size 时，按中英文标点（。！？.!?）拆分为句子
+- **字符级兜底**：单个句子仍超长时，逐字符拆分确保不超过阈值
+
+**默认参数**：
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `chunk_size` | 512 | token 数（约 768 中文字符） |
+| `chunk_overlap` | 80 | ~15%，保证跨块上下文连续性 |
+
+**为什么重要**：
+- 标题和内容分离 → 检索时只能命中标题或内容，LLM 看不到完整上下文
+- 字符数计数 → 中文 token 数约为字符数的 1.5 倍，容易超出预期
+- 重叠太小 → 跨块语义信息丢失
+
+```python
+# 示例：订单状态修复文档
+# 之前（旧算法）：标题和修复脚本在不同块 → 检索失败
+# 现在（新算法）：标题强制切分，标题+查询+修复脚本在同一块 → 检索成功
+```
+
+### 2. 多集合管理
 
 ```python
 kb.add_document("file.pdf", collection_name="采购合同")
@@ -465,7 +497,7 @@ kb.add_document("file.md", collection_name="产品文档")
 results = kb.vector_store.search(query_embedding, top_k=5, filter={"collection": "采购合同"})
 ```
 
-### 2. Excel 智能导入
+### 3. Excel 智能导入
 
 导入 Excel 时自动检测数据类型，决定清洗策略：
 
@@ -506,7 +538,7 @@ ensemble_retriever = EnsembleRetriever(
 )
 ```
 
-### 3. Rerank重排序
+### 4. Rerank重排序
 
 ```python
 from langchain_community.cross_encoders import CrossEncoder
@@ -515,7 +547,7 @@ reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 # 对检索结果重新排序
 ```
 
-### 4. REST API（可扩展）
+### 5. REST API（可扩展）
 
 ```python
 from fastapi import FastAPI
@@ -541,9 +573,24 @@ async def query_knowledge(request: QueryRequest):
 
 A: 可能原因：
 1. 文档质量差 → 清理文档格式
-2. 分块不合理 → 调整 CHUNK_SIZE
+2. 分块不合理 → 调整 CHUNK_SIZE，确保标题和内容在同一块
 3. 检索不到相关内容 → 检查嵌入模型
 4. LLM理解偏差 → 优化prompt
+
+### Q: 分块大小和重叠如何设置？
+
+A: 默认 `chunk_size=512` token，`chunk_overlap=80` token（~15%）。
+- **增大 chunk_size**：适合长文档，但可能包含无关信息
+- **减小 chunk_size**：适合短文档，但可能丢失上下文
+- **增大 overlap**：提高跨块召回率，但增加冗余
+- **减小 overlap**：减少冗余，但可能丢失跨块语义
+
+**推荐值**：
+| 文档类型 | chunk_size | chunk_overlap |
+|----------|-----------|---------------|
+| 技术文档/Markdown | 512 | 80 |
+| 长篇小说/论文 | 768 | 100 |
+| 短问答/FAQ | 256 | 40 |
 
 ### Q: 如何支持中文？
 
@@ -565,6 +612,17 @@ LLM_MODEL = "llama3"
 ### Q: 启动慢怎么办？
 
 A: 嵌入模型采用**延迟加载**策略，启动时只初始化 ChromaDB（约 1-2 秒），嵌入模型在首次查询或上传文档时才载入内存。第一次加载后后续重启会使用本地缓存，速度更快。
+
+### Q: tiktoken 安装失败怎么办？
+
+A: tiktoken 用于精确计数 token。如果安装失败，系统会自动回退到字符数估算（`len(s) / 1.5`），不影响功能，只是分块精度稍低。
+```bash
+pip install tiktoken
+```
+国内网络可尝试：
+```bash
+pip install tiktoken -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
 
 ### Q: 模型下载失败/被墙怎么办？
 
@@ -597,6 +655,7 @@ maxUploadSize = 1000  # 改为 1GB
 | 嵌入速度 | 批量处理 | 5-10倍提升 |
 | LLM速度 | 使用小模型+Rerank | 成本降低50% |
 | 内存占用 | 量化嵌入向量 | 减少75% |
+| 分块精度 | 使用tiktoken精确计数 | 减少上下文窗口溢出 |
 
 ---
 
