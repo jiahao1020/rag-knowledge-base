@@ -580,12 +580,11 @@ class RAGKnowledgeBase:
         self.is_initialized = False
     
     def initialize(self):
-        """初始化所有组件"""
+        """初始化所有组件（延迟加载嵌入模型，加快启动速度）"""
         logger.info("🔄 初始化RAG知识库...")
-        self.embedding_manager.load_model()
-        self.vector_store.initialize()
+        self.vector_store.initialize()  # 轻量，仅连接 ChromaDB
         self.is_initialized = True
-        logger.info("✅ 初始化完成")
+        logger.info("✅ 初始化完成（嵌入模型将在首次使用时加载）")
     
     def add_document(self, file_path: str, collection_name: str = "default"):
         """添加文档到知识库"""
