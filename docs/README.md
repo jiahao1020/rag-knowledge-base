@@ -48,7 +48,7 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 
 | 功能模块 | 实现内容 | 代码行数 |
 |---------|---------|---------|
-| **文档加载** | 支持PDF、Markdown、TXT、DOCX四种格式 | ~80行 |
+| **文档加载** | 支持PDF、Markdown、TXT、DOCX、Excel五种格式 | ~95行 |
 | **文本分块** | 智能分块算法，支持自定义块大小和重叠 | ~60行 |
 | **向量化** | 本地嵌入模型（sentence-transformers） | ~40行 |
 | **向量存储** | ChromaDB持久化存储，支持查询和统计 | ~80行 |
@@ -82,14 +82,13 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 
 | 文件 | 行数 | 说明 |
 |------|------|------|
-| `rag_knowledge_base.py` | ~540 | 核心引擎 |
-| `app.py` | ~280 | Web界面 |
+| `rag_knowledge_base.py` | ~800 | 核心引擎（含Excel智能清洗） |
+| `app.py` | ~300 | Web界面（响应式移动端适配） |
 | `requirements.txt` | ~20 | 依赖列表 |
 | `.streamlit/config.toml` | ~3 | Streamlit配置（上传大小限制） |
 | `docker/Dockerfile` | ~25 | Docker镜像 |
 | `docker/docker-compose.yml` | ~35 | 一键部署 |
 | `docs/README.md` | ~200 | 使用文档 |
-| **总计** | **~1100行** | |
 
 ---
 
@@ -243,8 +242,12 @@ class Config:
 
 class DocumentProcessor:
     """文档处理 - 多格式支持"""
-    load_document()      # 加载PDF/MD/TXT/DOCX
-    split_text()         # 智能文本分块
+    load_document()          # 加载PDF/MD/TXT/DOCX/Excel
+    split_text()             # 智能文本分块
+    _load_excel_as_rows()    # Excel逐行读取
+    _detect_excel_type()     # 自动检测是否需要清洗
+    _add_excel_rows_raw()    # 普通表格逐行存储
+    _add_excel_rows_cleaned() # 结构化数据合并为自然语言
 
 class EmbeddingManager:
     """向量化 - 本地嵌入模型"""
@@ -290,7 +293,8 @@ class RAGKnowledgeBase:
 
 | 扩展点 | 当前实现 | 可扩展方向 |
 |--------|---------|-----------|
-| **文档格式** | PDF/MD/TXT/DOCX | 添加HTML、Excel、PPT支持 |
+| **文档格式** | PDF/MD/TXT/DOCX/Excel | 添加HTML、PPT支持 |
+| **Excel智能导入** | 自动检测+行级存储/结构化清洗 | 支持多Sheet、按任务类别分组 |
 | **向量数据库** | ChromaDB | 支持Qdrant、Pinecone、Milvus |
 | **检索策略** | 向量检索 | 添加混合检索（BM25+向量） |
 | **重排序** | 无 | 添加Cross-Encoder Rerank |
@@ -461,7 +465,33 @@ kb.add_document("file.md", collection_name="产品文档")
 results = kb.vector_store.search(query_embedding, top_k=5, filter={"collection": "采购合同"})
 ```
 
-### 2. 混合检索（向量+关键词）
+### 2. Excel 智能导入
+
+导入 Excel 时自动检测数据类型，决定清洗策略：
+
+**自动检测规则：**
+- 列名含 `任务类别`、`查询脚本`、`SQL`、`修复` 等关键词 → 结构化清洗
+- 单元格含 `update`、`insert into`、`delete from` 等 SQL 关键词 → 结构化清洗
+- 普通表格（商品名/价格/库存等）→ 逐行存储
+
+**结构化清洗效果（以修复类 Excel 为例）：**
+
+```python
+# 原始 Excel 行数据（碎片化）
+Row 5:  任务类别=订单类型 | 前置查询脚本=select... | 修复项=修复字段 | 订单头表=po_type_id
+Row 6:  修复项=修复脚本   | 订单头表=update sodr_po_header set po_type_id=?
+
+# 清洗后入库（自然语言描述，查询和修复合并为一段）
+任务类别：订单类型。
+前置查询脚本：select order_type_id,order_type_code,order_type_name from sodr_order_type...
+修复项：修复字段。修复字段（表：订单头表）：po_type_id。
+修复项：修复脚本。修复脚本（表：订单头表）：update sodr_po_header set po_type_id=...
+涉及表：订单头表。
+```
+
+**多 Sheet 支持：** 自动遍历所有 sheet，按 sheet 分组处理
+
+**支持格式：** `.xlsx` / `.xls`
 
 ```python
 from langchain.retrievers import BM25Retriever, VectorStoreRetriever

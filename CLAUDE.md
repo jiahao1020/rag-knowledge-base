@@ -6,13 +6,13 @@
 
 ## 项目概述
 
-RAG（检索增强生成）知识库系统。支持 PDF/Markdown/TXT/DOCX 文档上传、向量检索和 LLM 生成回答。
+RAG（检索增强生成）知识库系统。支持 PDF/Markdown/TXT/DOCX/Excel 文档上传、向量检索和 LLM 生成回答。Excel 导入时自动检测数据类型，结构化数据（SQL修复类）会合并为自然语言描述后入库，提升检索精度。
 
 ## 架构
 
 **核心引擎**（`rag_knowledge_base.py`）：五个类组成流水线：
 - `Config` — 集中配置（分块大小、模型名称、提供商）
-- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX，文本分块
+- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX/Excel，文本分块；Excel 智能检测（`_detect_excel_type`）判断是否需要清洗
 - `EmbeddingManager` — 封装 sentence-transformers 用于本地嵌入
 - `VectorStore` — ChromaDB 持久化存储（余弦相似度、HNSW 索引）
 - `LLMGenerator` — 多提供商支持（OpenAI、Anthropic、Google、本地 Ollama）

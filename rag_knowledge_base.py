@@ -157,6 +157,8 @@ class DocumentProcessor:
             return DocumentProcessor._load_text(file_path)
         elif suffix == ".docx":
             return DocumentProcessor._load_docx(file_path)
+        elif suffix in [".xlsx", ".xls"]:
+            return DocumentProcessor._load_excel(file_path)
         else:
             raise ValueError(f"不支持的文档格式: {suffix}")
 
@@ -204,7 +206,105 @@ class DocumentProcessor:
             return "\n".join(texts)
         except ImportError:
             raise ImportError("请安装python-docx: pip install python-docx")
-    
+
+    @staticmethod
+    def _load_excel(file_path: Path) -> str:
+        """加载Excel文档（备选：整表文本）"""
+        rows_data = DocumentProcessor._load_excel_as_rows(file_path)
+        parts = []
+        for sheet_name, row_idx, row_text, _ in rows_data:
+            parts.append(f"【工作表: {sheet_name} | 行: {row_idx}】\n{row_text}")
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _detect_excel_type(file_path: Path) -> bool:
+        """检测Excel是否需要清洗入库
+        返回 True = 需要清洗（结构化数据，行间有依赖）
+               False = 逐行存储即可（普通表格）
+        """
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            needs_clean = False
+            for sheet_name in wb.sheetnames[:3]:  # 只看前3个sheet
+                ws = wb[sheet_name]
+                # 读取表头
+                for cell in next(ws.iter_rows(values_only=True), []):
+                    header = str(cell) if cell else ""
+                    # 关键词检测
+                    clean_keywords = ["脚本", "SQL", "查询", "修复", "任务类别",
+                                      "sql", "脚本", "语句"]
+                    if any(k in header for k in clean_keywords):
+                        needs_clean = True
+                        break
+                if needs_clean:
+                    break
+
+                # 检测前10行是否有SQL关键词
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=2):
+                    if row_idx > 10:
+                        break
+                    for cell in row:
+                        val = str(cell) if cell else ""
+                        import re
+                        if re.search(r'\b(update|insert into|delete from|alter table|create table|select\s.*from)\b',
+                                     val, re.IGNORECASE):
+                            needs_clean = True
+                            break
+                    if needs_clean:
+                        break
+
+            wb.close()
+            return needs_clean
+        except ImportError:
+            return False
+
+    @staticmethod
+    def _load_excel_as_rows(file_path: Path) -> List[tuple]:
+        """逐行读取Excel，返回 [(sheet_name, row_index, row_text, metadata_dict), ...]
+
+        每行独立作为一个条目，适合结构化数据（如：类别 + 查询脚本 + SQL）。
+        row_text 带列名前缀，便于LLM理解也利于向量检索。
+        metadata_dict 包含原始列值，可用于过滤。
+        """
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            rows = []
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                # 读取表头作为列名
+                headers = []
+                for cell in next(ws.iter_rows(values_only=True), []):
+                    headers.append(str(cell) if cell is not None else f"列{len(headers)+1}")
+
+                # 逐行读取，每行作为一个独立条目
+                for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=2):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    if not any(c.strip() for c in cells):
+                        continue
+
+                    # 构建带列名的文本：【列名】值 | 【列名】值 | ...
+                    labeled_parts = []
+                    for i, val in enumerate(cells):
+                        label = headers[i] if i < len(headers) else f"列{i+1}"
+                        if val.strip():
+                            labeled_parts.append(f"【{label}】{val}")
+                    row_text = "\n".join(labeled_parts)
+
+                    # 元数据：保留原始列值（取前3列作为关键字段方便过滤，最多10列避免元数据过大）
+                    meta = {"sheet": sheet_name, "row": row_idx}
+                    for i, val in enumerate(cells[:10]):
+                        label = headers[i] if i < len(headers) else f"col{i}"
+                        if val.strip():
+                            meta[label] = val.strip()
+
+                    rows.append((sheet_name, row_idx, row_text, meta))
+            wb.close()
+            return rows
+        except ImportError:
+            raise ImportError("请安装 openpyxl: pip install openpyxl")
+
     @staticmethod
     def split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
         """文本分块 - 使用 list 拼接避免 O(n²) 性能问题"""
@@ -296,15 +396,17 @@ class EmbeddingManager:
             raise ImportError("请安装 sentence-transformers: pip install sentence-transformers")
 
     def _optimize_model(self):
-        """模型内存优化：GPU 可用时转为半精度，减少 ~50% 内存"""
+        """模型优化：GPU 半精度 + CPU 线程优化"""
         if self.model is None:
             return
         import torch
         if torch.cuda.is_available():
             self.model = self.model.half()
-            logger.debug("模型已转为半精度 (FP16)，内存占用减少 ~50%")
+            logger.info("✅ 模型已转为半精度 (FP16)，内存占用减少 ~50%")
         else:
-            logger.debug("CPU 模式运行，跳过半精度转换")
+            # CPU 模式：优化线程数以充分利用多核
+            torch.set_num_threads(min(8, os.cpu_count() or 4))
+            logger.info(f"✅ CPU 线程数已优化: {torch.get_num_threads()}")
 
     def _find_local_cache(self) -> Optional[str]:
         """查找本地是否已有缓存的模型"""
@@ -344,16 +446,16 @@ class EmbeddingManager:
         """生成文档嵌入向量"""
         if self.model is None:
             self.load_model()
-        logger.debug(f"生成 {len(texts)} 个文档嵌入向量...")
-        return self.model.encode(texts).tolist()
-    
+        logger.info(f"⏳ 正在为 {len(texts)} 个文档块生成嵌入向量（首次较慢，请耐心等待）...")
+        return self.model.encode(texts, show_progress_bar=True).tolist()
+
     def embed_query(self, query: str) -> List[float]:
         """生成查询嵌入向量"""
         if self.model is None:
             self.load_model()
         # bge 模型需要加检索指令前缀以获得更好效果
         query = "为这个句子生成表示以用于检索相关文章：" + query
-        return self.model.encode([query])[0].tolist()
+        return self.model.encode([query], show_progress_bar=False)[0].tolist()
 
 
 # ==================== 向量数据库 ====================
@@ -597,17 +699,16 @@ class RAGKnowledgeBase:
 
         logger.info(f"📄 处理文档: {path.name}")
 
-        # 加载文档
-        text = self.processor.load_document(path)
+        # Excel 文件：行级处理（结构化数据，每行一个独立条目）
+        if path.suffix.lower() in [".xlsx", ".xls"]:
+            return self._add_excel_rows(path, collection_name)
 
-        # 文本分块
+        # 其他格式：传统文本流水线
+        text = self.processor.load_document(path)
         chunks = self.processor.split_text(text, Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
         logger.info(f"📄 {path.name}: 分成 {len(chunks)} 个块")
 
-        # 生成嵌入
         embeddings = self.embedding_manager.embed_documents(chunks)
-
-        # 添加元数据
         metadatas = [{
             "source": str(path),
             "filename": path.name,
@@ -616,9 +717,158 @@ class RAGKnowledgeBase:
             "total_chunks": len(chunks)
         } for i in range(len(chunks))]
 
-        # 添加到向量库
         self.vector_store.add_documents(chunks, embeddings, metadatas)
+        return len(chunks)
 
+    def _add_excel_rows(self, path: Path, collection_name: str) -> int:
+        """Excel 智能入库：自动检测类型，决定清洗或逐行存储"""
+        if self.processor._detect_excel_type(path):
+            logger.info(f"🔍 {path.name}：检测为结构化数据，启动智能清洗")
+            return self._add_excel_rows_cleaned(path, collection_name)
+        else:
+            logger.info(f"📋 {path.name}：检测为普通表格，逐行存储")
+            return self._add_excel_rows_raw(path, collection_name)
+
+    def _add_excel_rows_raw(self, path: Path, collection_name: str) -> int:
+        """普通表格：逐行直接存储"""
+        rows = self.processor._load_excel_as_rows(path)
+        if not rows:
+            logger.warning(f"⚠️  Excel 文件为空: {path.name}")
+            return 0
+
+        chunks = []
+        metadatas = []
+        for sheet_name, row_idx, row_text, row_meta in rows:
+            chunks.append(row_text)
+            metadatas.append({
+                "source": str(path),
+                "filename": path.name,
+                "collection": collection_name,
+                "sheet": sheet_name,
+                "row": row_idx,
+            })
+
+        logger.info(f"📊 {path.name}: {len(chunks)} 行")
+        embeddings = self.embedding_manager.embed_documents(chunks)
+        self.vector_store.add_documents(chunks, embeddings, metadatas)
+        return len(chunks)
+
+    def _add_excel_rows_cleaned(self, path: Path, collection_name: str) -> int:
+        """结构化数据：自动按任务类别分组，合并为自然语言描述"""
+        import re
+
+        rows = self.processor._load_excel_as_rows(path)
+        if not rows:
+            logger.warning(f"⚠️  Excel 文件为空: {path.name}")
+            return 0
+
+        logger.info(f"📊 {path.name}: 共 {len(rows)} 行数据")
+
+        # 按 sheet 分组（天然支持多 Sheet）
+        from collections import defaultdict
+        sheets_data = defaultdict(list)
+        for sheet_name, row_idx, row_text, row_meta in rows:
+            sheets_data[sheet_name].append((row_idx, row_text, row_meta))
+
+        chunks = []
+        metadatas = []
+
+        for sheet_name, sheet_rows in sheets_data.items():
+            # 按行号排序
+            sheet_rows.sort(key=lambda x: x[0])
+
+            # 遍历行，按有"任务类别"的行做分组
+            groups = []
+            current_group = []
+
+            for row_idx, row_text, row_meta in sheet_rows:
+                has_task = bool(row_meta.get("任务类别", ""))
+                if has_task and current_group:
+                    groups.append(current_group)
+                    current_group = []
+                current_group.append((row_idx, row_text, row_meta))
+
+            if current_group:
+                groups.append(current_group)
+
+            # 处理每个分组：合并为自然语言
+            for group in groups:
+                task_category = ""
+                query_script = ""
+                fix_items = []
+                fix_scripts = []
+                table_mappings = {}
+
+                for row_idx, row_text, row_meta in group:
+                    tc = row_meta.get("任务类别", "")
+                    qs = row_meta.get("前置查询脚本", "")
+                    fi = row_meta.get("修复项", "")
+                    fs = row_meta.get("修复脚本", "")
+
+                    if tc and not task_category:
+                        task_category = tc
+                    if qs and not query_script:
+                        query_script = qs
+                    if fi:
+                        fix_items.append(fi)
+                    if fs:
+                        fix_scripts.append(fs)
+
+                    # 收集表名列（非已知列且值不空的列）
+                    known_cols = {"任务类别", "前置查询脚本", "修复项", "修复脚本", "修复说明"}
+                    for k, v in row_meta.items():
+                        col_name = k
+                        if col_name not in known_cols and v.strip():
+                            table_mappings[col_name] = v.strip()
+
+                # 跳过纯表头行
+                if not task_category and not query_script and not fix_items:
+                    continue
+
+                # 构建自然语言描述
+                parts = []
+                if task_category:
+                    parts.append(f"任务类别：{task_category}。")
+                if query_script:
+                    parts.append(f"前置查询脚本：{query_script}。")
+
+                # 修复项 + 修复脚本
+                for fi in fix_items:
+                    # 检查同一分组里有没有对应的修复脚本（表名列含 update/delete/insert）
+                    found_script = False
+                    for table_name, table_value in table_mappings.items():
+                        if re.search(r'(update|insert|delete|alter|create|drop)\s', table_value, re.IGNORECASE):
+                            parts.append(f"修复项：{fi}。修复脚本（表：{table_name}）：{table_value}。")
+                            found_script = True
+                        else:
+                            # 非 SQL 的值当成字段名
+                            parts.append(f"修复字段（表：{table_name}）：{table_value}。")
+
+                # 涉及的表名
+                table_names = [t for t in table_mappings.keys()
+                               if not re.search(r'(update|insert|delete)', table_mappings[t], re.IGNORECASE)]
+                if table_names:
+                    parts.append(f"涉及表：{'、'.join(table_names)}。")
+
+                chunk_text = "".join(parts)
+                if chunk_text.strip():
+                    chunks.append(chunk_text)
+                    meta = {
+                        "source": str(path),
+                        "filename": path.name,
+                        "collection": collection_name,
+                        "sheet": sheet_name,
+                        "task_category": task_category or "未分类",
+                    }
+                    metadatas.append(meta)
+
+        if not chunks:
+            logger.warning(f"⚠️  {path.name}：清洗后无有效数据")
+            return 0
+
+        logger.info(f"🧹 {path.name}：清洗后生成 {len(chunks)} 条自然语言描述")
+        embeddings = self.embedding_manager.embed_documents(chunks)
+        self.vector_store.add_documents(chunks, embeddings, metadatas)
         return len(chunks)
 
     def add_url(self, url: str, collection_name: str = "default"):
@@ -696,14 +946,11 @@ class RAGKnowledgeBase:
                 results['distances']
             ):
                 for doc, meta, dist in zip(docs, metadatas, distances):
-                    similarity = 1 - dist
-                    # 过滤低相似度结果，减少无效上下文
-                    if similarity >= Config.SIMILARITY_THRESHOLD:
-                        contexts.append({
-                            "content": doc,
-                            "metadata": meta,
-                            "similarity": similarity
-                        })
+                    contexts.append({
+                        "content": doc,
+                        "metadata": meta,
+                        "similarity": 1 - dist
+                    })
         
         logger.info(f"   检索到 {len(contexts)} 个相关文档块")
         

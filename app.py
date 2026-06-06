@@ -13,6 +13,15 @@ from datetime import datetime
 from rag_knowledge_base import RAGKnowledgeBase, Config, logger
 
 
+# ==================== 初始化 session state ====================
+
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+if "pending_query" not in st.session_state:
+    st.session_state.pending_query = None
+
+
 # ==================== 初始化 RAG 引擎 ====================
 
 @st.cache_resource
@@ -38,6 +47,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+    /* ========== 基础变量 ========== */
     .main-header {
         font-size: 2.5rem;
         font-weight: bold;
@@ -70,6 +80,51 @@ st.markdown("""
         font-size: 0.8rem;
         margin: 0.2rem;
     }
+
+    /* ========== 移动端适配 ========== */
+    @media (max-width: 768px) {
+        .main-header {
+            font-size: 1.5rem;
+            text-align: center;
+        }
+        .sub-header {
+            font-size: 0.9rem;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        .context-box {
+            padding: 0.75rem;
+        }
+        .context-box p {
+            font-size: 0.85rem;
+        }
+        .answer-box {
+            padding: 1rem;
+        }
+        /* 预设问题按钮：4列变2列 */
+        div[data-testid="column"] {
+            min-width: 45%;
+        }
+        /* 侧边栏内容紧凑 */
+        section[data-testid="stSidebar"] .stButton button {
+            font-size: 0.85rem;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .main-header {
+            font-size: 1.2rem;
+        }
+        .source-tag {
+            font-size: 0.7rem;
+            padding: 0.15rem 0.4rem;
+        }
+        /* 侧边栏展开时内容紧凑 */
+        section[data-testid="stSidebar"] .stButton button {
+            font-size: 0.85rem;
+            padding: 0.3rem 0.5rem;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,10 +155,10 @@ with st.sidebar:
     # 操作选项
     st.subheader("操作")
 
-    if st.button("📤 添加文档", use_container_width=True):
+    if st.button("📤 添加文档", use_container_width=True, disabled=st.session_state.processing):
         st.session_state.show_upload = True
 
-    if st.button("🗑️ 清空知识库", use_container_width=True):
+    if st.button("🗑️ 清空知识库", use_container_width=True, disabled=st.session_state.processing):
         st.session_state.show_upload = False
         st.info("清空功能暂未实现")
 
@@ -164,7 +219,7 @@ if st.session_state.get("show_upload", False):
     with st.expander("📤 上传文档", expanded=True):
         uploaded_files = st.file_uploader(
             "选择要上传的文档",
-            type=["pdf", "md", "txt", "docx"],
+            type=["pdf", "md", "txt", "docx", "xlsx", "xls"],
             accept_multiple_files=True,
             label_visibility="collapsed"
         )
@@ -172,13 +227,20 @@ if st.session_state.get("show_upload", False):
         if uploaded_files:
             st.info(f"已选择 {len(uploaded_files)} 个文件")
 
-            if st.button("开始上传并处理", use_container_width=True, key="process_upload"):
+            if st.button("开始上传并处理", use_container_width=True, key="process_upload",
+                          disabled=st.session_state.processing):
+                st.session_state.processing = True
+                st.rerun()
+
+            if st.session_state.processing and st.session_state.get("show_upload", False):
                 success_count = 0
                 fail_count = 0
                 total_chunks = 0
-                progress_bar = st.progress(0)
+                progress_bar = st.progress(0, text="准备处理...")
 
                 for i, f in enumerate(uploaded_files):
+                    status_text = f"📄 ({i+1}/{len(uploaded_files)}) 处理: {f.name}"
+                    progress_bar.progress((i) / len(uploaded_files), text=status_text)
                     try:
                         # 保存到临时文件
                         suffix = Path(f.name).suffix or ".tmp"
@@ -186,26 +248,31 @@ if st.session_state.get("show_upload", False):
                             tmp.write(f.read())
                             tmp_path = tmp.name
 
-                        # 处理文档
+                        # 处理文档（分块 → 嵌入向量 → 存储）
+                        progress_bar.progress((i + 0.5) / len(uploaded_files), text=f"⏳ {f.name}: 生成嵌入向量中...")
                         chunks = kb.add_document(tmp_path)
                         total_chunks += chunks
                         success_count += 1
 
                         # 清理临时文件
                         os.unlink(tmp_path)
+                        progress_bar.progress((i + 1) / len(uploaded_files), text=f"✅ {f.name} 完成 ({chunks} 个块)")
 
                     except Exception as e:
                         fail_count += 1
+                        logger.error(f"处理失败 {f.name}: {e}")
                         st.error(f"❌ {f.name} 处理失败: {e}")
+                    finally:
+                        progress_bar.progress((i + 1) / len(uploaded_files))
 
-                    progress_bar.progress((i + 1) / len(uploaded_files))
+                st.session_state.processing = False
+                st.session_state.show_upload = False
 
                 if success_count > 0:
                     st.success(f"🎉 {success_count} 个文档处理完成，共 {total_chunks} 个文档块")
                 if fail_count > 0:
                     st.warning(f"⚠️ {fail_count} 个文档处理失败")
 
-                st.session_state.show_upload = False
                 st.rerun()
 
     st.divider()
@@ -224,8 +291,9 @@ preset_questions = [
 col1, col2, col3, col4 = st.columns(4)
 for i, q in enumerate(preset_questions):
     with [col1, col2, col3, col4][i % 4]:
-        if st.button(q, use_container_width=True, key=f"preset_{i}"):
-            st.session_state.query = q
+        if st.button(q, use_container_width=True, key=f"preset_{i}",
+                      disabled=st.session_state.processing):
+            st.session_state.query_input = q
 
 st.divider()
 
@@ -234,27 +302,41 @@ query = st.text_area(
     "输入你的问题",
     placeholder="例如：如何优化RAG的检索效果？",
     height=100,
-    key="query"
+    value=st.session_state.get("query_input", ""),
 )
 
+# 将用户输入同步回 session_state
+st.session_state.query_input = query
 col_search, col_clear = st.columns([3, 1])
 with col_search:
-    search_btn = st.button("🔍 搜索", type="primary", use_container_width=True)
+    search_btn = st.button("🔍 搜索", type="primary", use_container_width=True,
+                           disabled=st.session_state.processing)
 with col_clear:
-    if st.button("🔄 清空", use_container_width=True):
-        st.session_state.query = ""
+    if st.button("🔄 清空", use_container_width=True, disabled=st.session_state.processing):
+        st.session_state.query_input = ""
         st.session_state.search_result = None
+        st.session_state.pending_query = None
         st.rerun()
 
-# 执行查询
-if search_btn and query.strip():
+# 执行查询（两步走：先 rerun 禁用按钮，再真正执行查询）
+if search_btn and query.strip() and not st.session_state.processing:
+    st.session_state.processing = True
+    st.session_state.pending_query = query
+    st.rerun()
+
+if st.session_state.pending_query is not None:
     with st.spinner("正在检索知识库..."):
         try:
-            result = kb.query(query, top_k=top_k)
+            result = kb.query(st.session_state.pending_query, top_k=top_k)
             st.session_state.search_result = result
         except Exception as e:
-            st.error(f"查询失败: {e}")
+            logger.error(f"查询失败: {e}")
+            st.error(f"❌ 查询失败: {e}")
             st.session_state.search_result = None
+        finally:
+            st.session_state.processing = False
+            st.session_state.pending_query = None
+    st.rerun()
 
 # 显示查询结果
 result = st.session_state.get("search_result")
