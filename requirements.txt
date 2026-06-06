@@ -15,11 +15,14 @@ python-docx>=1.0.0
 markdown>=3.5.0
 beautifulsoup4>=4.12.0
 
-# Tools
+# Web UI
+streamlit>=1.28.0
 tiktoken>=0.5.0
 numpy>=1.24.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
+
+modelscope>=1.0.0  # Fallback model source for China users
 
 # Optional: other LLM providers
 # langchain-anthropic>=0.0.5  # Claude

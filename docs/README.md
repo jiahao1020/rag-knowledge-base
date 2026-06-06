@@ -85,6 +85,7 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 | `rag_knowledge_base.py` | ~540 | 核心引擎 |
 | `app.py` | ~280 | Web界面 |
 | `requirements.txt` | ~20 | 依赖列表 |
+| `.streamlit/config.toml` | ~3 | Streamlit配置（上传大小限制） |
 | `docker/Dockerfile` | ~25 | Docker镜像 |
 | `docker/docker-compose.yml` | ~35 | 一键部署 |
 | `docs/README.md` | ~200 | 使用文档 |
@@ -166,7 +167,7 @@ RAG（Retrieval-Augmented Generation，检索增强生成）是一种结合**检
 | 层级 | 技术 | 版本 | 说明 |
 |------|------|------|------|
 | **编程语言** | Python | 3.10+ | 核心开发语言 |
-| **嵌入模型** | sentence-transformers | all-MiniLM-L6-v2 | 本地运行，免费 |
+| **嵌入模型** | sentence-transformers | BAAI/bge-large-zh-v1.5 | 本地运行，免费 |
 | **向量数据库** | ChromaDB | 0.4+ | 轻量级，无需服务 |
 | **LLM框架** | LangChain | 0.1+ | 主流框架，生态丰富 |
 | **文档处理** | pypdf, python-docx | 最新 | PDF/Word解析 |
@@ -369,16 +370,13 @@ docker-compose up -d
 
 ### API密钥配置
 
-API密钥通过 `.env` 文件配置（**不要**放入 `config.yml`，避免提交到 git）：
+API密钥支持以下方式配置：
 
-```bash
-# .env 文件内容
-OPENAI_API_KEY=sk-xxxxxxxxxxxx
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxx
-GOOGLE_API_KEY=xxxxxxxxxxxx
-```
+**方式一：Web 界面动态配置（推荐）**
+启动 Web 界面后，在侧边栏 ⚙️ 配置中直接填入 API Key 和 Base URL，立即生效，无需重启。
 
-程序启动时自动加载 `.env` 文件中的环境变量。
+**方式二：.env 文件**
+复制 `.env.example` 为 `.env` 并填入密钥，程序启动时自动加载。修改 `config.yml` 后可在 Web 界面点击"重新加载配置"按钮生效。
 
 ### LLM提供商切换
 
@@ -415,9 +413,30 @@ llm_base_url: "https://api.deepseek.com/v1"
 | 服务 | base_url | 模型示例 |
 |------|----------|---------|
 | DeepSeek | `https://api.deepseek.com/v1` | deepseek-chat |
+| 商汤日日新 | `https://token.sensenova.cn/v1` | sensenova-6.7-flash-lite |
 | 阿里通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | qwen-plus |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | glm-4 |
 | 月之暗面 | `https://api.moonshot.cn/v1` | moonshot-v1 |
+
+### 日志级别控制
+
+通过 `LOG_LEVEL` 环境变量控制日志详细程度，默认 `INFO`：
+
+```bash
+# 仅显示 WARNING 及以上级别
+LOG_LEVEL=WARNING python rag_knowledge_base.py --command stats
+
+# 显示 DEBUG 详细信息（调试用）
+LOG_LEVEL=DEBUG python rag_knowledge_base.py --command stats
+```
+
+日志输出格式：`[2026-06-06 09:48:54] [INFO] 消息`
+
+日志同时输出到：
+- **终端**（stderr）— 实时查看
+- **文件** `logs/rag_kb.log` — 自动轮转，单个文件最大 5MB，保留 3 个备份
+
+Web 界面侧边栏 ⚙️ 配置中也可直接切换日志级别，无需重启。
 
 ### 中文优化
 
@@ -513,6 +532,29 @@ LLM_PROVIDER = "local"  # Ollama
 LLM_MODEL = "llama3"
 ```
 
+### Q: 模型下载失败/被墙怎么办？
+
+A: 内置 ModelScope 备选源，自动切换。也可手动下载：
+```bash
+pip install modelscope
+python -c "from modelscope import snapshot_download; snapshot_download('BAAI/bge-large-zh-v1.5')"
+```
+
+### Q: PDF 上传报错 cryptography 怎么办？
+
+A: 部分 PDF 用了 AES 加密，安装：
+```bash
+pip install cryptography
+```
+
+### Q: Web 上传超过 200MB 怎么办？
+
+A: 编辑 `.streamlit/config.toml`，增大限制：
+```toml
+[server]
+maxUploadSize = 1000  # 改为 1GB
+```
+
 ### Q: 性能如何优化？
 
 | 优化项 | 方法 | 效果 |
@@ -534,6 +576,8 @@ rag-knowledge-base/
 ├── requirements.txt         # Python依赖
 ├── .env                     # API密钥（不提交git）
 ├── .env.example             # 环境变量模板
+├── .streamlit/
+│   └── config.toml          # Streamlit配置（上传大小限制）
 ├── docs/
 │   └── README.md            # 本文档
 ├── data/                    # 数据存储目录

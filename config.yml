@@ -6,8 +6,8 @@ embedding_model: "BAAI/bge-large-zh-v1.5"
 
 # LLM配置
 llm_provider: "openai"  # openai | anthropic | google | local
-llm_model: "gpt-4o"
-# llm_base_url: "https://api.openai.com/v1"  # 对接国内模型时取消注释并改为此地址
+llm_model: "sensenova-6.7-flash-lite"
+llm_base_url: "https://token.sensenova.cn/v1"  # 对接国内模型时取消注释并改为此地址
 
 # 向量数据库
 vector_db: "chroma"  # chroma | faiss | qdrant

@@ -11,6 +11,7 @@ RAG知识库系统 - 轻量级实现
 """
 
 import os
+import re
 import sys
 import json
 import argparse
@@ -21,6 +22,46 @@ from typing import List, Optional, Dict, Any
 # 加载 .env 文件（如存在），使 LLM API key 等环境变量生效
 from dotenv import load_dotenv
 load_dotenv()
+
+# ==================== 日志配置 ====================
+
+import logging
+from logging.handlers import RotatingFileHandler
+
+def setup_logger(name: str = "rag_kb") -> logging.Logger:
+    """配置日志格式，支持 LOG_LEVEL 环境变量控制级别"""
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger  # 避免重复添加 handler
+
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logger.setLevel(getattr(logging, level, logging.INFO))
+
+    formatter = logging.Formatter(
+        fmt="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # 终端输出（stderr）
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    # 文件输出（自动轮转，单个文件最大 5MB，保留 3 个备份）
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "rag_kb.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+logger = setup_logger()
 
 # ==================== 配置 ====================
 
@@ -55,9 +96,9 @@ class Config:
     _loaded = False
 
     @classmethod
-    def load(cls):
+    def load(cls, force: bool = False):
         """从 YAML 文件加载配置"""
-        if cls._loaded:
+        if cls._loaded and not force:
             return
         cls._loaded = True
 
@@ -87,11 +128,11 @@ class Config:
                 if yaml_key in data and data[yaml_key] is not None:
                     setattr(cls, attr, data[yaml_key])
 
-            print(f"✅ 已加载配置: {yml_path}")
+            logger.info(f"✅ 已加载配置: {yml_path}")
         except ImportError:
-            print("⚠️  pyyaml 未安装，使用默认配置 (pip install pyyaml)")
+            logger.warning("⚠️  pyyaml 未安装，使用默认配置 (pip install pyyaml)")
         except Exception as e:
-            print(f"⚠️  配置文件加载失败 ({e})，使用默认配置")
+            logger.warning(f"⚠️  配置文件加载失败 ({e})，使用默认配置")
 
 
 # 启动时自动加载配置
@@ -136,10 +177,10 @@ class DocumentProcessor:
         try:
             from pypdf import PdfReader
             reader = PdfReader(str(file_path))
-            text = ""
+            texts = []
             for page in reader.pages:
-                text += page.extract_text() + "\n\n"
-            return text
+                texts.append(page.extract_text())
+            return "\n\n".join(texts)
         except ImportError:
             raise ImportError("请安装pypdf: pip install pypdf")
     
@@ -159,45 +200,52 @@ class DocumentProcessor:
         try:
             from docx import Document
             doc = Document(str(file_path))
-            text = ""
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-            return text
+            texts = [para.text for para in doc.paragraphs]
+            return "\n".join(texts)
         except ImportError:
             raise ImportError("请安装python-docx: pip install python-docx")
     
     @staticmethod
     def split_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[str]:
-        """文本分块"""
+        """文本分块 - 使用 list 拼接避免 O(n²) 性能问题"""
         # 按段落分割
         paragraphs = text.split("\n\n")
         chunks = []
-        current_chunk = ""
-        
+        current_parts = []
+        current_len = 0
+
         for para in paragraphs:
-            if len(current_chunk) + len(para) < chunk_size:
-                current_chunk += para + "\n\n"
+            para_len = len(para)
+            if current_len + para_len < chunk_size:
+                current_parts.append(para)
+                current_len += para_len + 2  # +2 for "\n\n"
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
+                if current_parts:
+                    chunks.append("\n\n".join(current_parts).strip())
                 # 处理长段落
-                if len(para) > chunk_size:
-                    # 按句子分割
-                    sentences = para.split(". ")
-                    current_chunk = ""
+                if para_len > chunk_size:
+                    # 按句子分割（支持中英文标点）
+                    sentences = re.split(r'(?<=[。！？.!?])\s*', para)
+                    current_parts = []
+                    current_len = 0
                     for sent in sentences:
-                        if len(current_chunk) + len(sent) < chunk_size:
-                            current_chunk += sent + ". "
+                        if not sent.strip():
+                            continue
+                        if current_len + len(sent) < chunk_size:
+                            current_parts.append(sent)
+                            current_len += len(sent)
                         else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                            current_chunk = sent + ". "
+                            if current_parts:
+                                chunks.append("".join(current_parts).strip())
+                            current_parts = [sent]
+                            current_len = len(sent)
                 else:
-                    current_chunk = para + "\n\n"
-        
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        
+                    current_parts = [para]
+                    current_len = para_len
+
+        if current_parts:
+            chunks.append("\n\n".join(current_parts).strip())
+
         # 添加重叠
         if chunk_overlap > 0 and len(chunks) > 1:
             final_chunks = [chunks[0]]
@@ -205,7 +253,7 @@ class DocumentProcessor:
                 overlap = chunks[i-1][-chunk_overlap:]
                 final_chunks.append(overlap + chunks[i])
             return final_chunks
-        
+
         return chunks
 
 
@@ -219,18 +267,84 @@ class EmbeddingManager:
         self.model = None
     
     def load_model(self):
-        """加载嵌入模型"""
+        """加载嵌入模型，优先从 ModelScope 下载（国内网络友好）"""
         try:
             from sentence_transformers import SentenceTransformer
+
+            # 先检查本地缓存
+            model_path = self._find_local_cache()
+            if model_path:
+                self.model = SentenceTransformer(model_path)
+                logger.info(f"✅ 从本地缓存加载嵌入模型: {self.model_name}")
+                self._optimize_model()
+                return
+
+            # 优先从 ModelScope 下载
+            try:
+                self._load_from_modelscope()
+                self._optimize_model()
+                return
+            except Exception:
+                logger.warning("⚠️  ModelScope 下载失败，尝试从 HuggingFace 下载...")
+
+            # 最后尝试 HuggingFace
             self.model = SentenceTransformer(self.model_name)
-            print(f"✅ 加载嵌入模型: {self.model_name}")
+            logger.info(f"✅ 从 HuggingFace 加载嵌入模型: {self.model_name}")
+            self._optimize_model()
+
         except ImportError:
-            raise ImportError("请安装sentence-transformers: pip install sentence-transformers")
+            raise ImportError("请安装 sentence-transformers: pip install sentence-transformers")
+
+    def _optimize_model(self):
+        """模型内存优化：GPU 可用时转为半精度，减少 ~50% 内存"""
+        if self.model is None:
+            return
+        import torch
+        if torch.cuda.is_available():
+            self.model = self.model.half()
+            logger.debug("模型已转为半精度 (FP16)，内存占用减少 ~50%")
+        else:
+            logger.debug("CPU 模式运行，跳过半精度转换")
+
+    def _find_local_cache(self) -> Optional[str]:
+        """查找本地是否已有缓存的模型"""
+        import os
+        # HuggingFace cache 目录结构
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+        model_id = self.model_name.replace("/", "--")
+        # 检查 snapshots 下是否有文件
+        snapshots_dir = cache_dir / f"models--{model_id}" / "snapshots"
+        if snapshots_dir.exists():
+            for snapshot in snapshots_dir.iterdir():
+                if snapshot.is_dir() and any(snapshot.iterdir()):
+                    return str(snapshot)
+        # 检查 sentence-transformers 缓存
+        st_cache = Path.home() / ".cache" / "torch" / "sentence_transformers" / self.model_name
+        if st_cache.exists():
+            return str(st_cache)
+        return None
+
+    def _load_from_modelscope(self):
+        """从 ModelScope 下载并加载模型"""
+        try:
+            from modelscope import snapshot_download
+            from sentence_transformers import SentenceTransformer
+
+            model_dir = snapshot_download(self.model_name)
+            self.model = SentenceTransformer(model_dir)
+            logger.info(f"✅ 从 ModelScope 加载嵌入模型: {self.model_name}")
+        except ImportError:
+            raise ImportError(
+                "请安装 modelscope: pip install modelscope\n"
+                "或手动下载模型: python -c \"from modelscope import snapshot_download; "
+                "snapshot_download('BAAI/bge-large-zh-v1.5')\""
+            )
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """生成文档嵌入向量"""
         if self.model is None:
             self.load_model()
+        logger.debug(f"生成 {len(texts)} 个文档嵌入向量...")
         return self.model.encode(texts).tolist()
     
     def embed_query(self, query: str) -> List[float]:
@@ -261,33 +375,47 @@ class VectorStore:
             client = chromadb.PersistentClient(path=str(self.db_path))
             self.collection = client.get_or_create_collection(
                 name="knowledge_base",
-                metadata={"hnsw:space": "cosine"}
+                metadata={
+                    "hnsw:space": "cosine",
+                    "hnsw:M": 12,           # 默认16，降低连接数减少内存
+                    "hnsw:construction_ef": 100,  # 构建精度
+                    "hnsw:search_ef": 20,   # 默认10，适当提高检索召回
+                }
             )
-            print(f"✅ 向量数据库初始化: {self.db_path}")
+            logger.info(f"✅ 向量数据库初始化: {self.db_path}")
         except ImportError:
             raise ImportError("请安装chromadb: pip install chromadb")
     
-    def add_documents(self, texts: List[str], embeddings: List[List[float]], 
+    def add_documents(self, texts: List[str], embeddings: List[List[float]],
                       metadatas: List[Dict] = None):
-        """添加文档到向量库"""
+        """添加文档到向量库（写入失败自动回滚）"""
         if self.collection is None:
             self.initialize()
-        
+
         # 生成ID
-        ids = [f"doc_{i}_{datetime.now().strftime('%Y%m%d%H%M%S')}" 
+        ids = [f"doc_{i}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
                for i in range(len(texts))]
-        
+
         # 默认元数据
         if metadatas is None:
             metadatas = [{"source": "unknown"} for _ in texts]
-        
-        self.collection.add(
-            documents=texts,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
-        )
-        print(f"✅ 添加了 {len(texts)} 个文档块")
+
+        try:
+            self.collection.add(
+                documents=texts,
+                embeddings=embeddings,
+                metadatas=metadatas,
+                ids=ids
+            )
+            logger.info(f"✅ 添加了 {len(texts)} 个文档块")
+        except Exception as e:
+            # 写入失败时清理部分写入的数据
+            try:
+                self.collection.delete(ids=ids)
+                logger.error(f"写入失败，已回滚 {len(texts)} 个文档块: {e}")
+            except Exception:
+                logger.error(f"写入失败且回滚异常: {e}")
+            raise e
     
     def search(self, query_embedding: List[float], top_k: int = 5):
         """向量检索"""
@@ -315,20 +443,59 @@ class VectorStore:
 
 class LLMGenerator:
     """LLM回答生成"""
-    
-    def __init__(self, provider: str = Config.LLM_PROVIDER, 
+
+    def __init__(self, provider: str = Config.LLM_PROVIDER,
                  model: str = Config.LLM_MODEL):
         self.provider = provider
         self.model = model
-    
+        self._llm_cache = {}  # 缓存 LLM 实例避免重复创建
+
+    def _get_llm(self):
+        """获取（或创建）缓存的 LLM 实例"""
+        cache_key = (self.provider, self.model, Config.LLM_BASE_URL)
+        if cache_key in self._llm_cache:
+            return self._llm_cache[cache_key]
+
+        try:
+            if self.provider == "openai":
+                from langchain_openai import ChatOpenAI
+                self._llm_cache[cache_key] = ChatOpenAI(
+                    model=self.model, temperature=0.7,
+                    base_url=Config.LLM_BASE_URL,
+                )
+            elif self.provider == "anthropic":
+                from langchain_anthropic import ChatAnthropic
+                self._llm_cache[cache_key] = ChatAnthropic(model=self.model, temperature=0.7)
+            elif self.provider == "google":
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                self._llm_cache[cache_key] = ChatGoogleGenerativeAI(model=self.model, temperature=0.7)
+            elif self.provider == "local":
+                from langchain_community.chat_models import ChatOllama
+                self._llm_cache[cache_key] = ChatOllama(model="llama3", temperature=0.7)
+            else:
+                raise ValueError(f"不支持的LLM提供商: {self.provider}")
+        except ImportError as e:
+            pkg_map = {
+                "openai": "langchain-openai",
+                "anthropic": "langchain-anthropic",
+                "google": "langchain-google-genai",
+                "local": "langchain-community",
+            }
+            raise ImportError(f"请安装 {pkg_map.get(self.provider, 'langchain')}: pip install {pkg_map.get(self.provider, 'langchain')}") from e
+
+        return self._llm_cache[cache_key]
+
     def generate_answer(self, query: str, context: List[Dict]) -> str:
         """生成回答"""
-        # 构建上下文
+        if not context:
+            return "未检索到相关文档，请先上传文档到知识库。"
+
+        # 构建上下文（修复 metadata 取值路径）
         context_text = "\n\n".join([
-            f"来源: {m.get('source', 'unknown')}\n内容: {d}"
-            for d, m in zip(context, [c.get('metadatas', [{}])[0] for c in context])
+            f"来源: {c['metadata'].get('filename', c['metadata'].get('source', 'unknown'))}\n内容: {c['content']}"
+            for c in context
         ])
-        
+
         prompt = f"""你是一位知识助手，请根据以下检索到的信息回答问题。
 如果信息不足，请诚实说明。
 
@@ -346,34 +513,22 @@ class LLMGenerator:
 
 【回答】
 """
-        
-        # 调用LLM（这里以OpenAI为例，可切换其他提供商）
-        if self.provider == "openai":
-            return self._call_openai(prompt)
-        elif self.provider == "anthropic":
-            return self._call_anthropic(prompt)
-        elif self.provider == "google":
-            return self._call_google(prompt)
-        elif self.provider == "local":
-            return self._call_local(prompt)
-        else:
-            raise ValueError(f"不支持的LLM提供商: {self.provider}")
-    
-    def _call_openai(self, prompt: str) -> str:
-        """调用OpenAI API"""
+
         try:
-            from langchain_openai import ChatOpenAI
             from langchain_core.messages import HumanMessage
-            
-            llm = ChatOpenAI(
-                model=self.model,
-                temperature=0.7,
-                base_url=Config.LLM_BASE_URL,
-            )
+            llm = self._get_llm()
             response = llm.invoke([HumanMessage(content=prompt)])
             return response.content
-        except ImportError:
-            raise ImportError("请安装langchain-openai: pip install langchain-openai")
+        except Exception as e:
+            logger.error(f"LLM 调用失败: {e}")
+            raise
+
+    def _call_openai(self, prompt: str) -> str:
+        """调用OpenAI API（保留，兼容外部直接调用）"""
+        from langchain_core.messages import HumanMessage
+        llm = self._get_llm()
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return response.content
     
     def _call_anthropic(self, prompt: str) -> str:
         """调用Anthropic API"""
@@ -426,11 +581,11 @@ class RAGKnowledgeBase:
     
     def initialize(self):
         """初始化所有组件"""
-        print("🔄 初始化RAG知识库...")
+        logger.info("🔄 初始化RAG知识库...")
         self.embedding_manager.load_model()
         self.vector_store.initialize()
         self.is_initialized = True
-        print("✅ 初始化完成")
+        logger.info("✅ 初始化完成")
     
     def add_document(self, file_path: str, collection_name: str = "default"):
         """添加文档到知识库"""
@@ -441,14 +596,14 @@ class RAGKnowledgeBase:
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        print(f"📄 处理文档: {path.name}")
+        logger.info(f"📄 处理文档: {path.name}")
 
         # 加载文档
         text = self.processor.load_document(path)
 
         # 文本分块
         chunks = self.processor.split_text(text, Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
-        print(f"   分成 {len(chunks)} 个块")
+        logger.info(f"📄 {path.name}: 分成 {len(chunks)} 个块")
 
         # 生成嵌入
         embeddings = self.embedding_manager.embed_documents(chunks)
@@ -472,7 +627,7 @@ class RAGKnowledgeBase:
         if not self.is_initialized:
             self.initialize()
 
-        print(f"🌐 加载在线文档: {url}")
+        logger.info(f"🌐 加载在线文档: {url}")
 
         # 加载在线文档
         text = self.processor.load_url(url)
@@ -481,7 +636,7 @@ class RAGKnowledgeBase:
 
         # 文本分块
         chunks = self.processor.split_text(text, Config.CHUNK_SIZE, Config.CHUNK_OVERLAP)
-        print(f"   分成 {len(chunks)} 个块")
+        logger.info(f"   分成 {len(chunks)} 个块")
 
         # 生成嵌入
         embeddings = self.embedding_manager.embed_documents(chunks)
@@ -499,11 +654,6 @@ class RAGKnowledgeBase:
         self.vector_store.add_documents(chunks, embeddings, metadatas)
 
         return len(chunks)
-        
-        # 添加到向量库
-        self.vector_store.add_documents(chunks, embeddings, metadatas)
-        
-        return len(chunks)
     
     def add_directory(self, dir_path: str, pattern: str = "*.md", 
                       collection_name: str = "default"):
@@ -513,7 +663,7 @@ class RAGKnowledgeBase:
             raise FileNotFoundError(f"目录不存在: {dir_path}")
         
         files = list(path.glob(pattern))
-        print(f"📁 找到 {len(files)} 个文件")
+        logger.info(f"📁 找到 {len(files)} 个文件")
         
         total_chunks = 0
         for file_path in files:
@@ -521,7 +671,7 @@ class RAGKnowledgeBase:
                 chunks = self.add_document(str(file_path), collection_name)
                 total_chunks += chunks
             except Exception as e:
-                print(f"   ⚠️ 处理 {file_path.name} 失败: {e}")
+                logger.error(f"⚠️  处理 {file_path.name} 失败: {e}")
         
         return total_chunks
     
@@ -530,7 +680,7 @@ class RAGKnowledgeBase:
         if not self.is_initialized:
             self.initialize()
         
-        print(f"🔍 查询: {question}")
+        logger.info(f"🔍 查询: {question}")
         
         # 生成查询嵌入
         query_embedding = self.embedding_manager.embed_query(question)
@@ -547,13 +697,16 @@ class RAGKnowledgeBase:
                 results['distances']
             ):
                 for doc, meta, dist in zip(docs, metadatas, distances):
-                    contexts.append({
-                        "content": doc,
-                        "metadata": meta,
-                        "similarity": 1 - dist  # 转换为相似度
-                    })
+                    similarity = 1 - dist
+                    # 过滤低相似度结果，减少无效上下文
+                    if similarity >= Config.SIMILARITY_THRESHOLD:
+                        contexts.append({
+                            "content": doc,
+                            "metadata": meta,
+                            "similarity": similarity
+                        })
         
-        print(f"   检索到 {len(contexts)} 个相关文档块")
+        logger.info(f"   检索到 {len(contexts)} 个相关文档块")
         
         # 生成回答
         answer = self.llm_generator.generate_answer(question, contexts)
@@ -596,7 +749,7 @@ class RAGKnowledgeBase:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         
-        print(f"✅ 知识库已导出: {output_path}")
+        logger.info(f"✅ 知识库已导出: {output_path}")
         return output_path
 
 
@@ -625,11 +778,11 @@ def main():
         elif args.dir:
             kb.add_directory(args.dir, args.pattern)
         else:
-            print("❌ 请指定 --file、--url 或 --dir")
-    
+            logger.error("❌ 请指定 --file、--url 或 --dir")
+
     elif args.command == "query":
         if not args.question:
-            print("❌ 请指定 --question")
+            logger.error("❌ 请指定 --question")
             return
         result = kb.query(args.question)
         print("\n" + "="*60)

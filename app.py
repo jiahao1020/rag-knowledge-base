@@ -5,9 +5,25 @@ RAG知识库 - Streamlit Web界面
 
 import streamlit as st
 import os
-import json
+import tempfile
+import logging
 from pathlib import Path
 from datetime import datetime
+
+from rag_knowledge_base import RAGKnowledgeBase, Config, logger
+
+
+# ==================== 初始化 RAG 引擎 ====================
+
+@st.cache_resource
+def init_kb():
+    """初始化知识库（只执行一次）"""
+    kb = RAGKnowledgeBase()
+    kb.initialize()
+    return kb
+
+kb = init_kb()
+
 
 # ==================== 页面配置 ====================
 
@@ -62,51 +78,80 @@ st.markdown("""
 
 with st.sidebar:
     st.header("📚 RAG知识库")
-    
+
     st.markdown("---")
-    
+
     # 知识库状态
     st.subheader("知识库状态")
-    
-    # 模拟统计（实际应从后端获取）
-    stats = {
-        "文档数量": "12",
-        "文档块数量": "156",
-        "嵌入模型": "all-MiniLM-L6-v2",
-        "最后更新": datetime.now().strftime("%Y-%m-%d %H:%M")
-    }
-    
-    for key, value in stats.items():
-        st.metric(key, value)
-    
+
+    try:
+        kb_stats = kb.get_stats()
+        doc_count = kb_stats.get("document_count", 0)
+        st.metric("文档块数量", doc_count)
+        st.metric("嵌入模型", kb_stats.get("embedding_model", ""))
+        st.metric("LLM模型", f"{kb_stats.get('llm_provider')} / {kb_stats.get('llm_model')}")
+    except Exception:
+        st.metric("文档块数量", "0")
+        st.metric("嵌入模型", Config.EMBEDDING_MODEL)
+        st.metric("LLM模型", f"{Config.LLM_PROVIDER} / {Config.LLM_MODEL}")
+
     st.markdown("---")
-    
+
     # 操作选项
     st.subheader("操作")
-    
+
     if st.button("📤 添加文档", use_container_width=True):
         st.session_state.show_upload = True
-    
+
     if st.button("🗑️ 清空知识库", use_container_width=True):
-        st.warning("确定要清空知识库吗？")
-    
+        st.session_state.show_upload = False
+        st.info("清空功能暂未实现")
+
     st.markdown("---")
-    
+
     # 配置
-    with st.expander("⚙️ 配置"):
-        st.selectbox("嵌入模型", [
-            "all-MiniLM-L6-v2",
-            "paraphrase-multilingual-MiniLM-L12-v2",
-            "bge-large-zh-v1.5"
-        ])
-        st.selectbox("LLM模型", [
-            "gpt-4o",
-            "gpt-3.5-turbo",
-            "claude-3-5-sonnet",
-            "gemini-1.5-pro"
-        ])
-        st.slider("检索数量", 1, 10, 5)
-        st.slider("分块大小", 200, 1000, 500)
+    with st.expander("⚙️ 配置", expanded=False):
+        # API 密钥（动态设置，无需重启）
+        api_key = st.text_input(
+            "API Key",
+            type="password",
+            value=os.environ.get("OPENAI_API_KEY", ""),
+            placeholder="sk-xxx",
+            help="设置后立即生效，无需重启"
+        )
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
+
+        base_url = st.text_input(
+            "API Base URL（可选）",
+            value=Config.LLM_BASE_URL or "",
+            placeholder="https://api.deepseek.com/v1",
+            help="对接国内模型时填入对应的 base_url"
+        )
+        if base_url:
+            Config.LLM_BASE_URL = base_url
+
+        col1, col2 = st.columns(2)
+        with col1:
+            top_k = st.slider("检索数量", 1, 10, Config.TOP_K)
+        with col2:
+            chunk_size = st.slider("分块大小", 200, 1000, Config.CHUNK_SIZE, step=50)
+
+        # 日志级别
+        log_level = st.selectbox(
+            "日志级别",
+            options=["INFO", "DEBUG", "WARNING", "ERROR"],
+            index=0,
+            help="设置日志输出详细程度，DEBUG 显示最详细的信息"
+        )
+        if log_level != os.environ.get("LOG_LEVEL", "INFO"):
+            os.environ["LOG_LEVEL"] = log_level
+            logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+        if st.button("🔄 重新加载配置", use_container_width=True):
+            Config.load(force=True)
+            st.success("✅ 配置已重载")
+            st.rerun()
 
 
 # ==================== 主页面 ====================
@@ -123,19 +168,46 @@ if st.session_state.get("show_upload", False):
             accept_multiple_files=True,
             label_visibility="collapsed"
         )
-        
+
         if uploaded_files:
             st.info(f"已选择 {len(uploaded_files)} 个文件")
-            
-            if st.button("开始上传并处理", use_container_width=True):
-                with st.spinner("正在处理文档..."):
-                    # 模拟处理
-                    for f in uploaded_files:
-                        st.success(f"✅ {f.name}")
-                
-                st.success("🎉 文档处理完成！")
+
+            if st.button("开始上传并处理", use_container_width=True, key="process_upload"):
+                success_count = 0
+                fail_count = 0
+                total_chunks = 0
+                progress_bar = st.progress(0)
+
+                for i, f in enumerate(uploaded_files):
+                    try:
+                        # 保存到临时文件
+                        suffix = Path(f.name).suffix or ".tmp"
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(f.read())
+                            tmp_path = tmp.name
+
+                        # 处理文档
+                        chunks = kb.add_document(tmp_path)
+                        total_chunks += chunks
+                        success_count += 1
+
+                        # 清理临时文件
+                        os.unlink(tmp_path)
+
+                    except Exception as e:
+                        fail_count += 1
+                        st.error(f"❌ {f.name} 处理失败: {e}")
+
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+
+                if success_count > 0:
+                    st.success(f"🎉 {success_count} 个文档处理完成，共 {total_chunks} 个文档块")
+                if fail_count > 0:
+                    st.warning(f"⚠️ {fail_count} 个文档处理失败")
+
                 st.session_state.show_upload = False
-    
+                st.rerun()
+
     st.divider()
 
 # 查询区域
@@ -143,10 +215,10 @@ st.subheader("🔍 查询知识库")
 
 # 预设问题
 preset_questions = [
-    "如何设置API密钥？",
     "RAG的工作原理是什么？",
-    "如何部署到生产环境？",
+    "如何优化RAG的检索效果？",
     "支持哪些文档格式？",
+    "如何配置API密钥？",
 ]
 
 col1, col2, col3, col4 = st.columns(4)
@@ -169,83 +241,56 @@ col_search, col_clear = st.columns([3, 1])
 with col_search:
     search_btn = st.button("🔍 搜索", type="primary", use_container_width=True)
 with col_clear:
-    st.button("🔄 清空", use_container_width=True)
+    if st.button("🔄 清空", use_container_width=True):
+        st.session_state.query = ""
+        st.session_state.search_result = None
+        st.rerun()
 
-# 显示搜索结果
-if search_btn and query:
-    st.session_state.searching = True
-
-if st.session_state.get("searching", False) and query:
+# 执行查询
+if search_btn and query.strip():
     with st.spinner("正在检索知识库..."):
-        # 模拟检索结果
-        contexts = [
-            {
-                "content": "RAG（Retrieval-Augmented Generation）是一种结合检索和生成的AI技术。核心原理是：先从知识库检索相关文档，然后将检索结果作为上下文输入LLM生成回答。",
-                "source": "docs/README.md",
-                "similarity": 0.92
-            },
-            {
-                "content": "要优化RAG检索效果，可以：1. 调整分块大小（200-1000 tokens）2. 使用混合检索（向量+关键词）3. 添加Rerank重排序 4. 优化嵌入模型",
-                "source": "docs/README.md",
-                "similarity": 0.87
-            },
-            {
-                "content": "支持PDF、Markdown、TXT、DOCX等多种格式。文档上传后会自动分块、向量化并存储到向量数据库中。",
-                "source": "docs/README.md",
-                "similarity": 0.75
-            }
-        ]
-        
-        # 模拟LLM回答
-        answer = """根据检索到的信息，优化RAG检索效果的方法包括：
+        try:
+            result = kb.query(query, top_k=top_k)
+            st.session_state.search_result = result
+        except Exception as e:
+            st.error(f"查询失败: {e}")
+            st.session_state.search_result = None
 
-**1. 调整分块策略**
-- 分块大小建议在200-1000 tokens之间
-- 适当增加块重叠（50-100 tokens）可以提高检索连续性
+# 显示查询结果
+result = st.session_state.get("search_result")
+if result:
+    contexts = result.get("contexts", [])
+    answer = result.get("answer", "")
 
-**2. 使用混合检索**
-- 结合向量检索（语义相似）和关键词检索（BM25）
-- 权重建议：向量0.7 + 关键词0.3
+    if contexts:
+        st.subheader("📖 检索到的相关文档")
 
-**3. 添加Rerank重排序**
-- 对初步检索结果使用Cross-Encoder重新排序
-- 可以显著提升Top-K的准确性
+        for i, ctx in enumerate(contexts):
+            meta = ctx.get("metadata", {})
+            source = meta.get("filename", meta.get("source", "unknown"))
+            similarity = ctx.get("similarity", 0)
+            content = ctx.get("content", "")
 
-**4. 优化嵌入模型**
-- 中文场景推荐使用：bge-large-zh-v1.5
-- 多语言场景：paraphrase-multilingual-MiniLM-L12-v2
+            with st.container():
+                st.markdown(f"""
+                <div class="context-box">
+                    <span class="source-tag">{source}</span>
+                    <span style="color: #4caf50; font-weight: bold;">相似度: {similarity:.2f}</span>
+                    <p style="margin-top: 0.5rem;">{content[:300]}{'...' if len(content) > 300 else ''}</p>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.info("未检索到相关文档，请先上传文档到知识库")
 
-**5. 文档质量优化**
-- 清理格式、去除冗余内容
-- 添加结构化标题和元数据"""
-
-    # 显示上下文
-    st.subheader("📖 检索到的相关文档")
-    
-    for i, ctx in enumerate(contexts):
-        with st.container():
-            st.markdown(f"""
-            <div class="context-box">
-                <span class="source-tag">{ctx['source']}</span>
-                <span style="color: #4caf50; font-weight: bold;">相似度: {ctx['similarity']:.2f}</span>
-                <p style="margin-top: 0.5rem;">{ctx['content'][:200]}...</p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    st.divider()
-    
-    # 显示回答
-    st.subheader("💡 AI回答")
-    st.markdown(f"""
-    <div class="answer-box">
-        {answer}
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 引用来源
-    st.caption("📌 回答基于以上检索到的文档生成")
-    
-    st.session_state.searching = False
+    if answer:
+        st.divider()
+        st.subheader("💡 AI回答")
+        st.markdown(f"""
+        <div class="answer-box">
+            {answer}
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption(f"📌 回答基于以上检索到的文档生成 | {result.get('timestamp', '')}")
 
 
 # ==================== 页脚 ====================
