@@ -88,7 +88,7 @@ class Config:
     LLM_MODEL = "gpt-4o"
     LLM_BASE_URL = None  # 默认为官方 API，国内模型改为此地址
     VECTOR_DB = "chroma"
-    CHUNK_SIZE = 500
+    CHUNK_SIZE = 768
     CHUNK_OVERLAP = 50
     TOP_K = 5
     SIMILARITY_THRESHOLD = 0.7
@@ -306,8 +306,8 @@ class DocumentProcessor:
             raise ImportError("请安装 openpyxl: pip install openpyxl")
 
     @staticmethod
-    def split_text(text: str, chunk_size: int = 512, chunk_overlap: int = 80) -> List[str]:
-        """递归分块：按 Markdown 标题分段，tiktoken 精确计数"""
+    def split_text(text: str, chunk_size: int = 768, chunk_overlap: int = 80) -> List[str]:
+        """Markdown 分块：按 `##` 标题切分，`###` 及以下保持同块，超长子块自动添加父标题上下文"""
         try:
             import tiktoken
             enc = tiktoken.get_encoding("cl100k_base")
@@ -321,95 +321,100 @@ class DocumentProcessor:
         chunks = []
         current_parts = []
         current_len = 0
+        current_section = ""  # 当前 ## 标题，用于上下文增强
 
-        def flush():
+        def hard_flush():
+            """硬切分：清空当前块（遇到新 ## 标题时）"""
             nonlocal current_parts, current_len
             if current_parts:
                 chunks.append("\n\n".join(current_parts).strip())
+            current_parts = []
+            current_len = 0
+
+        def soft_flush():
+            """软切分：将当前块存入 chunks，新块自动继承 ## 标题上下文"""
+            nonlocal current_parts, current_len
+            if current_parts:
+                chunks.append("\n\n".join(current_parts).strip())
+            # 新块以父标题开头，保证上下文独立
+            if current_section:
+                current_parts = [current_section]
+                current_len = count_tokens(current_section)
+            else:
                 current_parts = []
                 current_len = 0
 
-        for para in paragraphs:
+        def split_and_add(para, is_first=False):
+            """将段落拆分为句子/字符并加入当前块"""
+            nonlocal current_parts, current_len
             para_tokens = count_tokens(para)
-            is_heading = re.match(r"^#{1,6}\s", para.strip())
+            if not is_first and current_len + para_tokens <= chunk_size:
+                current_parts.append(para)
+                current_len += para_tokens
+                return False
 
-            if is_heading and current_parts:
-                flush()
+            if para_tokens > chunk_size * 0.8:
+                sentences = re.split(r"(?<=[。！？.!?])\s*", para)
+                for sent in sentences:
+                    if not sent.strip():
+                        continue
+                    sent_tokens = count_tokens(sent)
+                    if sent_tokens > chunk_size:
+                        for char in sent:
+                            if not char.strip():
+                                continue
+                            char_tokens = count_tokens(char)
+                            if current_parts and current_len + char_tokens > chunk_size:
+                                soft_flush()
+                            current_parts.append(char)
+                            current_len += char_tokens
+                    else:
+                        if current_parts and current_len + sent_tokens > chunk_size:
+                            soft_flush()
+                        current_parts.append(sent)
+                        current_len += sent_tokens
+            else:
+                if current_parts:
+                    soft_flush()
+                current_parts.append(para)
+                current_len += para_tokens
+            return True
+
+        for para in paragraphs:
+            if not para.strip():
+                continue
+            para_tokens = count_tokens(para)
+            is_sec_heading = re.match(r"^##{1}\s", para.strip())   # `##` 场景标题
+            is_sub_heading = re.match(r"^#{3,6}\s", para.strip())  # `###`+ 子标题
+
+            if is_sec_heading:
+                if current_parts:
+                    hard_flush()
+                current_section = para.strip()
 
             if not current_parts:
                 if para_tokens > chunk_size:
-                    # 段落本身超长，按句子拆分
-                    sentences = re.split(r"(?<=[。！？.!?])\s*", para)
-                    for sent in sentences:
-                        if not sent.strip():
-                            continue
-                        sent_tokens = count_tokens(sent)
-                        # 如果句子仍然超长，按字符拆分
-                        if sent_tokens > chunk_size:
-                            for char in sent:
-                                if not char.strip():
-                                    continue
-                                char_tokens = count_tokens(char)
-                                if current_parts:
-                                    current_parts.append(char)
-                                    current_len += char_tokens
-                                else:
-                                    current_parts = [char]
-                                    current_len = char_tokens
-                                # 字符拆分时也要检查是否超过 chunk_size
-                                if current_len >= chunk_size:
-                                    flush()
-                        else:
-                            if current_parts:
-                                current_parts.append(sent)
-                                current_len += sent_tokens
-                            else:
-                                current_parts = [sent]
-                                current_len = sent_tokens
+                    split_and_add(para, is_first=True)
                 else:
                     current_parts = [para]
                     current_len = para_tokens
-            elif current_len + para_tokens <= chunk_size:
-                current_parts.append(para)
-                current_len += para_tokens
             else:
-                flush()
-                if para_tokens > chunk_size * 0.8:
-                    sentences = re.split(r"(?<=[。！？.!?])\s*", para)
-                    for sent in sentences:
-                        if not sent.strip():
-                            continue
-                        sent_tokens = count_tokens(sent)
-                        if sent_tokens > chunk_size:
-                            for char in sent:
-                                if not char.strip():
-                                    continue
-                                char_tokens = count_tokens(char)
-                                if current_parts:
-                                    current_parts.append(char)
-                                    current_len += char_tokens
-                                else:
-                                    current_parts = [char]
-                                    current_len = char_tokens
-                                # 字符拆分时也要检查是否超过 chunk_size
-                                if current_len >= chunk_size:
-                                    flush()
-                        else:
-                            if current_parts:
-                                current_parts.append(sent)
-                                current_len += sent_tokens
-                            else:
-                                current_parts = [sent]
-                                current_len = sent_tokens
+                if is_sub_heading or current_len + para_tokens <= chunk_size:
+                    current_parts.append(para)
+                    current_len += para_tokens
                 else:
-                    current_parts = [para]
-                    current_len = para_tokens
+                    split_and_add(para)
 
-        flush()
+        hard_flush()
 
+        # 重叠处理 —— 只在同一场景内的相邻块之间添加重叠
         if chunk_overlap > 0 and len(chunks) > 1:
             final_chunks = [chunks[0]]
             for i in range(1, len(chunks)):
+                # 如果当前块以 ## 开头（新场景），不加重叠
+                if chunks[i].startswith("##"):
+                    final_chunks.append(chunks[i])
+                    continue
                 prev = chunks[i - 1]
                 overlap_chars = min(len(prev), chunk_overlap * 3)
                 overlap = prev[-overlap_chars:]
@@ -602,6 +607,25 @@ class VectorStore:
             "space": self.collection.metadata.get("hnsw:space", "cosine")
         }
 
+    def clear(self):
+        """清空向量数据库集合"""
+        if self.collection is None:
+            self.initialize()
+        try:
+            import chromadb
+            all_ids = self.collection.get()["ids"]
+            if all_ids:
+                # 分批删除，避免单次删除过多
+                batch_size = 50000
+                for i in range(0, len(all_ids), batch_size):
+                    self.collection.delete(ids=all_ids[i:i+batch_size])
+                logger.info(f"🗑️ 向量数据库已清空 ({len(all_ids)} 个文档块)")
+            else:
+                logger.info("🗑️ 向量数据库已是空的")
+        except Exception as e:
+            logger.error(f"清空失败: {e}")
+            raise
+
 
 # ==================== LLM生成 ====================
 
@@ -771,13 +795,20 @@ class RAGKnowledgeBase:
         logger.info(f"📄 {path.name}: 分成 {len(chunks)} 个块")
 
         embeddings = self.embedding_manager.embed_documents(chunks)
-        metadatas = [{
-            "source": str(path),
-            "filename": path.name,
-            "collection": collection_name,
-            "chunk_index": i,
-            "total_chunks": len(chunks)
-        } for i in range(len(chunks))]
+        metadatas = []
+        for i, chunk in enumerate(chunks):
+            section = ""
+            m = re.search(r"^##\s+(.+?)(?:\n|$)", chunk)
+            if m:
+                section = m.group(1)
+            metadatas.append({
+                "source": str(path),
+                "filename": path.name,
+                "collection": collection_name,
+                "section": section,
+                "chunk_index": i,
+                "total_chunks": len(chunks)
+            })
 
         self.vector_store.add_documents(chunks, embeddings, metadatas)
         return len(chunks)
@@ -953,13 +984,20 @@ class RAGKnowledgeBase:
         embeddings = self.embedding_manager.embed_documents(chunks)
 
         # 添加元数据
-        metadatas = [{
-            "source": url,
-            "filename": url,
-            "collection": collection_name,
-            "chunk_index": i,
-            "total_chunks": len(chunks)
-        } for i in range(len(chunks))]
+        metadatas = []
+        for i, chunk in enumerate(chunks):
+            section = ""
+            m = re.search(r"^##\s+(.+?)(?:\n|$)", chunk)
+            if m:
+                section = m.group(1)
+            metadatas.append({
+                "source": url,
+                "filename": url,
+                "collection": collection_name,
+                "section": section,
+                "chunk_index": i,
+                "total_chunks": len(chunks)
+            })
 
         # 添加到向量库
         self.vector_store.add_documents(chunks, embeddings, metadatas)
@@ -1037,7 +1075,12 @@ class RAGKnowledgeBase:
             "chunk_size": Config.CHUNK_SIZE,
             "chunk_overlap": Config.CHUNK_OVERLAP
         }
-    
+
+    def clear(self):
+        """清空知识库"""
+        self.vector_store.clear()
+        logger.info("🗑️ 知识库已清空")
+
     def export(self, output_path: str = None):
         """导出知识库"""
         if output_path is None:
@@ -1065,7 +1108,7 @@ class RAGKnowledgeBase:
 
 def main():
     parser = argparse.ArgumentParser(description="RAG知识库系统")
-    parser.add_argument("--command", "-c", choices=["add", "query", "stats", "export"],
+    parser.add_argument("--command", "-c", choices=["add", "query", "stats", "clear", "export"],
                         help="执行命令")
     parser.add_argument("--file", "-f", help="要添加的文件路径")
     parser.add_argument("--url", "-u", help="要添加的在线文档URL")
@@ -1073,6 +1116,7 @@ def main():
     parser.add_argument("--question", "-q", help="查询问题")
     parser.add_argument("--pattern", "-p", default="*.md", help="文件匹配模式")
     parser.add_argument("--output", "-o", help="导出路径")
+    parser.add_argument("--yes", "-y", action="store_true", help="自动确认（跳过确认提示）")
     
     args = parser.parse_args()
     
@@ -1105,6 +1149,14 @@ def main():
         stats = kb.get_stats()
         print(json.dumps(stats, indent=2, ensure_ascii=False))
     
+    elif args.command == "clear":
+        if not args.yes:
+            confirm = input("⚠️  确定要清空知识库吗？(yes/no): ")
+            if confirm.lower() not in ("yes", "y"):
+                logger.info("已取消")
+                return
+        kb.clear()
+
     elif args.command == "export":
         kb.export(args.output)
     

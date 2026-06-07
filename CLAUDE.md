@@ -12,7 +12,7 @@ RAG（检索增强生成）知识库系统。支持 PDF/Markdown/TXT/DOCX/Excel 
 
 **核心引擎**（`rag_knowledge_base.py`）：六个类组成流水线：
 - `Config` — 集中配置（分块大小、模型名称、提供商）
-- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX/Excel，递归分块（tiktoken 精确计数，Markdown 标题强制切分，句子/字符降级）；Excel 智能检测（`_detect_excel_type`）判断是否需要清洗
+- `DocumentProcessor` — 加载 PDF/MD/TXT/DOCX/Excel，`##` 场景分块 + 上下文增强（tiktoken 精确计数，句子/字符降级）；Excel 智能检测（`_detect_excel_type`）判断是否需要清洗
 - `EmbeddingManager` — 封装 sentence-transformers 用于本地嵌入
 - `VectorStore` — ChromaDB 持久化存储（余弦相似度、HNSW 索引，支持清空）
 - `LLMGenerator` — 多提供商支持（OpenAI、Anthropic、Google、本地 Ollama）
@@ -86,8 +86,8 @@ cd docker && docker-compose up -d
 | `llm_model` | gpt-4o | LLM 模型名称 |
 | `llm_base_url` | 无（使用官方 API） | 兼容 OpenAI 接口的自定义地址 |
 | `vector_db` | chroma | chroma / faiss / qdrant |
-| `chunk_size` | 512 | 每块最大 token 数（tiktoken 精确计数） |
-| `chunk_overlap` | 80 | 块之间重叠的 token 数（~15%） |
+| `chunk_size` | 768 | 每块最大 token 数（tiktoken 精确计数） |
+| `chunk_overlap` | 80 | 块之间重叠的 token 数（~10%） |
 | `top_k` | 5 | 检索返回的文档块数量 |
 | `similarity_threshold` | 0.7 | 相似度阈值 |
 

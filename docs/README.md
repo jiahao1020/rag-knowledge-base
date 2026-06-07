@@ -237,8 +237,8 @@ class Config:
     EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     LLM_PROVIDER = "openai"
     LLM_MODEL = "gpt-4o"
-    CHUNK_SIZE = 512      # token 数，tiktoken 精确计数
-    CHUNK_OVERLAP = 80    # token 数，~15%
+    CHUNK_SIZE = 768      # token 数，tiktoken 精确计数
+    CHUNK_OVERLAP = 80    # token 数，~10%
     TOP_K = 5
 
 class DocumentProcessor:
@@ -370,8 +370,8 @@ docker-compose up -d
 | `llm_provider` | openai | LLM提供商 |
 | `llm_model` | gpt-4o | LLM模型 |
 | `llm_base_url` | 无（使用官方API） | 兼容OpenAI接口的自定义地址 |
-| `chunk_size` | 512 | 分块大小（token，tiktoken 精确计数） |
-| `chunk_overlap` | 80 | 块重叠（token，~15%） |
+| `chunk_size` | 768 | 分块大小（token，tiktoken 精确计数） |
+| `chunk_overlap` | 80 | 块重叠（token，~10%） |
 | `top_k` | 5 | 检索返回数量 |
 | `similarity_threshold` | 0.7 | 相似度阈值 |
 
@@ -460,11 +460,26 @@ EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
 
 ### 1. 文本分块策略
 
-分块质量直接影响 RAG 检索效果。当前采用**递归分块**策略：
+分块质量直接影响 RAG 检索效果。当前采用**结构感知递归分块**策略：
 
-**切分优先级**：Markdown 标题 → 段落 → 句子 → 字符
+**核心规则**：按 `##` 标题切分场景，`###` 及以下子标题与父场景保持在同一块。
 
-- **Markdown 标题强制切分**：遇到 `#` 到 `######` 标题时立即切分，保证标题和内容在同一块
+**上下文增强**：当某个场景内容超长被切分成多个子块时，每个子块开头自动带上父 `##` 标题，确保子块被单独检索到时也能识别上下文。
+
+```
+旧方案（无上下文）:
+  块1: "## 订单类型修复\n\n### 前置查询\n\nselect..."
+  块7: "update sodr_po_header set po_type_id = ?" ← 不知道属于哪个场景
+
+新方案（上下文增强）:
+  块1: "## 订单类型修复\n\n### 前置查询\n\nselect..."
+  块7: "## 订单类型修复\n\nupdate sodr_po_header set ..." ← 明确所属场景
+```
+
+**切分优先级**：`##` 标题 → 段落 → 句子 → 字符
+
+- **`##` 标题强制切分**：遇到 `##` 标题时立即切分，保证每个场景独立完整
+- **`###` 及以下不切分**：子标题和主体内容保持在同一块
 - **tiktoken 精确计数**：使用 `cl100k_base` 编码精确计算 token 数，而非字符数
 - **句子降级拆分**：段落超过 chunk_size 时，按中英文标点（。！？.!?）拆分为句子
 - **字符级兜底**：单个句子仍超长时，逐字符拆分确保不超过阈值
@@ -473,8 +488,8 @@ EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| `chunk_size` | 512 | token 数（约 768 中文字符） |
-| `chunk_overlap` | 80 | ~15%，保证跨块上下文连续性 |
+| `chunk_size` | 768 | token 数（约 1152 中文字符） |
+| `chunk_overlap` | 80 | ~10%，保证跨块上下文连续性 |
 
 **为什么重要**：
 - 标题和内容分离 → 检索时只能命中标题或内容，LLM 看不到完整上下文
@@ -588,6 +603,7 @@ A: 默认 `chunk_size=512` token，`chunk_overlap=80` token（~15%）。
 **推荐值**：
 | 文档类型 | chunk_size | chunk_overlap |
 |----------|-----------|---------------|
+| **含 SQL 的场景文档** | 768 | 80 |
 | 技术文档/Markdown | 512 | 80 |
 | 长篇小说/论文 | 768 | 100 |
 | 短问答/FAQ | 256 | 40 |
